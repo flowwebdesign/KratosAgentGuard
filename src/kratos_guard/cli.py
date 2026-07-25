@@ -12,6 +12,13 @@ from kratos_guard.adapters.runtime import inspect_listeners
 from kratos_guard.core.artifacts import discover_artifacts
 from kratos_guard.core.authority_gate import qualified_gate
 from kratos_guard.core.bootstrap_gate import BootstrapFacts, bootstrap_verdict
+from kratos_guard.core.browser_canary import (
+    cleanup_guard_profile,
+    discover_browsers,
+    plan_extension_canary,
+    run_extension_canary,
+    verify_runtime_readback,
+)
 from kratos_guard.core.inspection_runner import inspect_target, verifier_identity
 from kratos_guard.core.loaded_evidence import validate_envelope
 from kratos_guard.core.manifests import generate_manifest
@@ -32,7 +39,8 @@ from kratos_guard.core.signing import (
     inspect_key,
     rotate_key,
 )
-from kratos_guard.models import InspectionReport
+from kratos_guard.models import CanaryReport, InspectionReport
+from kratos_guard.models.build import BuildAttestation
 from kratos_guard.projects.base import load_profile
 from kratos_guard.reporting.json_report import render_json, write_json
 from kratos_guard.reporting.markdown_report import render_markdown
@@ -40,7 +48,11 @@ from kratos_guard.reporting.redaction import redact
 
 app = typer.Typer(no_args_is_help=True)
 key_app = typer.Typer(no_args_is_help=True)
+browser_app = typer.Typer(no_args_is_help=True)
+canary_app = typer.Typer(no_args_is_help=True)
 app.add_typer(key_app, name="key")
+app.add_typer(browser_app, name="browser")
+app.add_typer(canary_app, name="canary")
 
 
 def _guard_root() -> Path:
@@ -156,10 +168,56 @@ def inspect(
 
 @app.command()
 def gate(
-    target: Annotated[Path, typer.Option(exists=True, file_okay=False)],
     level: Annotated[str, typer.Option(help="source, build, runtime, or loaded-client")],
+    target: Annotated[Path | None, typer.Option(exists=True, file_okay=False)] = None,
     profile: Annotated[str, typer.Option()] = "itzako",
+    candidate: Annotated[Path | None, typer.Option(exists=True, file_okay=False)] = None,
 ) -> None:
+    if level == "canary-runtime":
+        if candidate is None:
+            raise typer.BadParameter("--candidate is required for canary-runtime")
+        reports = sorted(
+            (_guard_root() / "evidence" / "inspections").glob("canary-*.json"),
+            key=lambda item: item.stat().st_mtime_ns,
+        )
+        matching = [
+            CanaryReport.model_validate_json(item.read_text(encoding="utf-8"))
+            for item in reports
+            if json.loads(item.read_text(encoding="utf-8"))
+            .get("candidate_identity", {})
+            .get("candidate_id")
+            == candidate.name
+        ]
+        proven = bool(
+            matching and matching[-1].runtime_verification.build_to_runtime_state.value == "PROVEN"
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "gate_id": "canary-runtime",
+                    "state": "PROVEN" if proven else "UNPROVEN",
+                    "scope": "ISOLATED_CANARY_LOADED_EXTENSION",
+                    "first_failing_boundary": "" if proven else "runtime-evidence",
+                },
+                indent=2,
+            )
+        )
+        raise typer.Exit(0 if proven else 2)
+    if level == "current-loaded-client":
+        typer.echo(
+            json.dumps(
+                {
+                    "gate_id": "current-loaded-client",
+                    "state": "UNPROVEN",
+                    "scope": "CURRENT_USER_LOADED_EXTENSION",
+                    "reason": "no authorised non-mutating live extension readback",
+                },
+                indent=2,
+            )
+        )
+        raise typer.Exit(2)
+    if target is None:
+        raise typer.BadParameter("--target is required for this gate level")
     report = inspect_target(target, profile, level)
     result = qualified_gate(report, level)
     typer.echo(render_json(result))
@@ -170,8 +228,36 @@ def gate(
 def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
-    report = InspectionReport.model_validate_json(report_path.read_text(encoding="utf-8"))
-    typer.echo(render_markdown(report))
+    payload = report_path.read_text(encoding="utf-8")
+    if '"runtime_verification"' in payload:
+        canary_report = CanaryReport.model_validate_json(payload)
+        typer.echo(
+            "\n".join(
+                [
+                    "# Kratos Agent Guard isolated canary",
+                    "",
+                    f"Qualified verdict: {canary_report.runtime_verification.verdict}",
+                    f"Candidate: {canary_report.candidate_identity['candidate_id']}",
+                    f"Browser: {canary_report.browser_executable.product}",
+                    "Extension ID: "
+                    + (
+                        canary_report.extension_runtime.extension_id
+                        if canary_report.extension_runtime
+                        else "UNPROVEN"
+                    ),
+                    f"Network: {canary_report.network_isolation.policy}",
+                    "Current user runtime: "
+                    f"{canary_report.current_user_runtime.loaded_extension_state}",
+                    "First failing boundary: "
+                    + (canary_report.runtime_verification.first_failing_boundary or "none"),
+                    "",
+                    "This evidence is scoped to the isolated Guard-owned canary.",
+                ]
+            )
+        )
+    else:
+        inspection_report = InspectionReport.model_validate_json(payload)
+        typer.echo(render_markdown(inspection_report))
 
 
 @app.command("import-loaded-client-evidence")
@@ -342,8 +428,6 @@ def build_sealed_candidate_command(
 def verify_attestation_command(
     attestation_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
-    from kratos_guard.models.build import BuildAttestation
-
     attestation = BuildAttestation.model_validate_json(attestation_path.read_text(encoding="utf-8"))
     workspace = attestation_path.parent.parent
     trusted_key = _guard_root() / "trust" / "keys" / f"{attestation.signing_key_id}.pub.json"
@@ -357,8 +441,6 @@ def verify_sealed_candidate_command(
     candidate_directory: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
 ) -> None:
     attestation_path = candidate_directory / "evidence" / "build-attestation.json"
-    from kratos_guard.models.build import BuildAttestation
-
     attestation = BuildAttestation.model_validate_json(attestation_path.read_text(encoding="utf-8"))
     trusted_key = _guard_root() / "trust" / "keys" / f"{attestation.signing_key_id}.pub.json"
     result = verify_candidate(candidate_directory, trusted_key)
@@ -372,3 +454,67 @@ def compare_candidates_command(
     candidate_b: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
 ) -> None:
     typer.echo(render_json(compare_candidates(candidate_a, candidate_b)))
+
+
+@browser_app.command("discover")
+def browser_discover_command() -> None:
+    typer.echo(
+        json.dumps(
+            [item.model_dump(mode="json") for item in discover_browsers()],
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@canary_app.command("plan-extension")
+def canary_plan_extension_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    policy = plan_extension_canary(_guard_root(), candidate)
+    typer.echo(render_json(policy))
+
+
+@canary_app.command("run-extension")
+def canary_run_extension_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    loaded = load_profile(profile)
+    target = Path(str(loaded["verified_source_root"]))
+    policy = plan_extension_canary(_guard_root(), candidate)
+    report = run_extension_canary(
+        _guard_root(),
+        candidate,
+        target,
+        policy,
+        verifier_identity().model_dump(mode="json"),
+    )
+    destination = _guard_root() / "evidence" / "inspections" / f"canary-{report.run_id}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(render_json(report) + "\n", encoding="utf-8")
+    typer.echo(render_json(report))
+    raise typer.Exit(
+        0 if report.runtime_verification.build_to_runtime_state.value == "PROVEN" else 2
+    )
+
+
+@canary_app.command("cleanup-profile")
+def canary_cleanup_profile_command(
+    profile_path: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    result = cleanup_guard_profile(_guard_root(), profile_path)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@app.command("verify-runtime-readback")
+def verify_runtime_readback_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    evidence: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    runtime_payload = payload["runtime_attestation"]
+    runtime_hash = payload["runtime_attestation_file_sha256"]
+    result = verify_runtime_readback(candidate, runtime_payload, runtime_hash, _guard_root())
+    typer.echo(render_json(result))
+    raise typer.Exit(0 if result.state.value == "PROVEN" else 3)

@@ -1,5 +1,6 @@
 """Strict evidence models."""
 
+from kratos_guard.models.canary import CanaryReport, RuntimeProofScope
 from kratos_guard.models.evidence import CommandEvidence, HashEvidence, Observation, Uncertainty
 from kratos_guard.models.identity import (
     TargetBuildIdentity,
@@ -13,11 +14,13 @@ from kratos_guard.models.verdict import GateResult, InspectionReport
 
 __all__ = [
     "CommandEvidence",
+    "CanaryReport",
     "EvidenceState",
     "GateResult",
     "HashEvidence",
     "InspectionReport",
     "Observation",
+    "RuntimeProofScope",
     "TargetBuildIdentity",
     "TargetLoadedClientIdentity",
     "TargetRuntimeIdentity",
