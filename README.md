@@ -61,3 +61,26 @@ uv run kratos-guard design-promotion --baseline <exact-baseline> --candidate-con
 
 There is no implicit `latest` baseline and no command that promotes the
 normal-profile extension.
+
+## Phase 2F isolated lineage reconciliation
+
+Phase 2F maps the configured operational bytes, reconstructs them only in a
+Guard-owned separate-object-database clone, and seals a compatibility-only
+successor. Every workspace, baseline, and candidate argument is exact; no
+command selects the latest result implicitly:
+
+```powershell
+uv run kratos-guard map-configured-extension-source --profile itzako
+uv run kratos-guard select-reconciliation-base --profile itzako
+uv run kratos-guard create-isolated-reconciliation --profile itzako
+uv run kratos-guard verify-baseline-equivalence --reconciliation <exact-workspace>
+uv run kratos-guard seal-reconciliation-lineage --reconciliation <exact-workspace>
+uv run kratos-guard build-compat-successor --reconciliation <exact-workspace>
+uv run kratos-guard verify-compat-successor --candidate <exact-candidate>
+uv run kratos-guard compare-successor-baseline --baseline <exact-baseline> --candidate <exact-candidate>
+uv run kratos-guard explain-report <phase2f-report>
+```
+
+The compatibility successor changes only version and provenance identity
+metadata. It performs no normal-profile promotion and leaves behavioural
+readiness explicitly unproven.

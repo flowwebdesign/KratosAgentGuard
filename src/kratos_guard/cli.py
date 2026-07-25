@@ -38,6 +38,15 @@ from kratos_guard.core.phase2e import (
     test_extension_id_stability,
     verify_current_baseline,
 )
+from kratos_guard.core.phase2f import (
+    build_compat_successor,
+    compare_successor_baseline,
+    create_isolated_reconciliation,
+    map_configured_extension_source,
+    select_reconciliation_base,
+    verify_lineage_attestation,
+    verify_reconciliation_workspace,
+)
 from kratos_guard.core.sealed_build import (
     build_input_manifest,
     build_sealed_candidate,
@@ -58,6 +67,11 @@ from kratos_guard.models import CanaryReport, InspectionReport
 from kratos_guard.models.build import BuildAttestation
 from kratos_guard.models.current_profile import CurrentProfileIdentityReport
 from kratos_guard.models.phase2e import Phase2EReport
+from kratos_guard.models.phase2f import (
+    IsolatedCloneIdentity,
+    Phase2FReport,
+    ReconciliationLineage,
+)
 from kratos_guard.projects.base import load_profile
 from kratos_guard.reporting.json_report import render_json, write_json
 from kratos_guard.reporting.markdown_report import render_markdown
@@ -287,7 +301,34 @@ def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     payload = report_path.read_text(encoding="utf-8")
-    if '"baseline_attestation"' in payload:
+    if '"successor_candidate"' in payload:
+        phase2f_report = Phase2FReport.model_validate_json(payload)
+        typer.echo(
+            "\n".join(
+                [
+                    "# Kratos Agent Guard Phase 2F compatibility successor",
+                    "",
+                    f"Qualified verdict: {phase2f_report.final_verdict}",
+                    f"Source mapping: {phase2f_report.mapping.verdict}",
+                    f"Reconciliation base: {phase2f_report.base_selection.selected_commit}",
+                    f"Isolated clone: {phase2f_report.clone.verdict}",
+                    f"Baseline equivalence: {phase2f_report.reconciliation.verdict}",
+                    f"Reconciliation commit: {phase2f_report.reconciliation.commit}",
+                    f"Bundle: {phase2f_report.reconciliation.bundle_verification}",
+                    f"Successor candidate: {phase2f_report.successor_candidate.candidate_id}",
+                    f"Successor version: {phase2f_report.successor_candidate.version}",
+                    f"Static compatibility: {phase2f_report.static_compatibility.verdict}",
+                    "Isolated runtime: "
+                    + str(phase2f_report.successor_canary.get("qualified_verdict", "UNPROVEN")),
+                    f"Promotion authority: {phase2f_report.promotion_authority}",
+                    f"First blocker: {phase2f_report.first_remaining_blocker}",
+                    "",
+                    "This compatibility successor does not contain a behavioural fix "
+                    "and is not authorised for promotion.",
+                ]
+            )
+        )
+    elif '"baseline_attestation"' in payload:
         phase2e_report = Phase2EReport.model_validate_json(payload)
         typer.echo(
             "\n".join(
@@ -700,6 +741,104 @@ def design_promotion_command(
     typer.echo(
         render_json(promotion_design(report.baseline, report.rollback_package, report.id_stability))
     )
+
+
+def _require_itzako(profile: str) -> None:
+    if profile != "itzako":
+        raise typer.BadParameter("only the itzako profile is supported")
+
+
+@app.command("map-configured-extension-source")
+def map_configured_extension_source_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    _require_itzako(profile)
+    typer.echo(render_json(map_configured_extension_source(_guard_root())))
+
+
+@app.command("select-reconciliation-base")
+def select_reconciliation_base_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    _require_itzako(profile)
+    typer.echo(render_json(select_reconciliation_base(_guard_root())))
+
+
+@app.command("create-isolated-reconciliation")
+def create_isolated_reconciliation_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    _require_itzako(profile)
+    mapping = map_configured_extension_source(_guard_root())
+    selection = select_reconciliation_base(_guard_root())
+    clone, lineage, plan = create_isolated_reconciliation(_guard_root(), mapping, selection)
+    typer.echo(
+        json.dumps(
+            {
+                "clone": clone.model_dump(mode="json"),
+                "lineage": lineage.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("verify-baseline-equivalence")
+def verify_baseline_equivalence_command(
+    reconciliation: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    result = verify_reconciliation_workspace(_guard_root(), reconciliation)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    raise typer.Exit(0 if result["verdict"] == "BASELINE_EQUIVALENT_BUILD_PROVEN" else 3)
+
+
+@app.command("seal-reconciliation-lineage")
+def seal_reconciliation_lineage_command(
+    reconciliation: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    result = verify_lineage_attestation(_guard_root(), reconciliation)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    raise typer.Exit(0 if result["verdict"] == "RECONCILIATION_LINEAGE_SIGNATURE_PROVEN" else 3)
+
+
+@app.command("build-compat-successor")
+def build_compat_successor_command(
+    reconciliation: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    clone = IsolatedCloneIdentity.model_validate_json(
+        (reconciliation / "evidence" / "clone-identity.json").read_text("utf-8")
+    )
+    lineage = ReconciliationLineage.model_validate_json(
+        (reconciliation / "evidence" / "reconciliation-lineage.json").read_text("utf-8")
+    )
+    delta, candidate = build_compat_successor(_guard_root(), clone, lineage, reconciliation.name)
+    typer.echo(
+        json.dumps(
+            {
+                "delta": delta.model_dump(mode="json"),
+                "candidate": candidate.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("verify-compat-successor")
+def verify_compat_successor_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    verify_sealed_candidate_command(candidate)
+
+
+@app.command("compare-successor-baseline")
+def compare_successor_baseline_command(
+    baseline: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(render_json(compare_successor_baseline(baseline, candidate)))
 
 
 @canary_app.command("plan-extension")
