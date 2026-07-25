@@ -54,6 +54,16 @@ from kratos_guard.core.phase2g import (
     import_successor_bundle,
     run_offline_golden_journeys,
 )
+from kratos_guard.core.phase2h import (
+    classify_protected_target_drift,
+    inspect_backend_contract,
+    plan_real_backend_journeys,
+    run_real_backend_journeys,
+    verify_database_readback,
+    verify_provider_test_seam,
+    verify_real_backend_report,
+    verify_synthetic_audit_identity,
+)
 from kratos_guard.core.sealed_build import (
     build_input_manifest,
     build_sealed_candidate,
@@ -308,7 +318,32 @@ def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     payload = report_path.read_text(encoding="utf-8")
-    if '"phase": "2G"' in payload:
+    if '"phase": "2H"' in payload:
+        phase2h_report = json.loads(payload)
+        budget = phase2h_report["budget"]
+        typer.echo(
+            "\n".join(
+                [
+                    "# Kratos Agent Guard Phase 2H real-backend journeys",
+                    "",
+                    f"Qualified verdict: {phase2h_report['final_verdict']}",
+                    f"Candidate: {phase2h_report['candidate_id']}",
+                    "Backend contract: " + phase2h_report["backend_contract"]["verdict"],
+                    "Synthetic identity: " + phase2h_report["synthetic_identity"]["verdict"],
+                    f"Provider seam: {phase2h_report['provider_seam']['verdict']}",
+                    "Database readback: " + phase2h_report["database_readback"]["verdict"],
+                    "Accepted backend operations: " + str(budget["backend_operations_accepted"]),
+                    f"Real provider calls: {phase2h_report['real_provider_calls']}",
+                    f"Normal Chrome mutations: {phase2h_report['normal_chrome_mutations']}",
+                    f"Promotion authority: {phase2h_report['promotion_authority']}",
+                    f"First blocker: {phase2h_report['first_remaining_blocker']}",
+                    "",
+                    "A blocked dispatch report proves the safety gate, not real-backend "
+                    "journey success.",
+                ]
+            )
+        )
+    elif '"phase": "2G"' in payload:
         phase2g_report = json.loads(payload)
         typer.echo(
             "\n".join(
@@ -918,6 +953,81 @@ def bundle_behavioural_lineage_command(
     typer.echo(
         json.dumps(
             bundle_behavioural_lineage(_guard_root(), repository),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("inspect-backend-contract")
+def inspect_backend_contract_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    typer.echo(render_json(inspect_backend_contract(profile)))
+
+
+@app.command("classify-protected-target-drift")
+def classify_protected_target_drift_command(
+    baseline: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    current: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    typer.echo(render_json(classify_protected_target_drift(baseline, current)))
+
+
+@app.command("verify-synthetic-audit-identity")
+def verify_synthetic_audit_identity_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    typer.echo(render_json(verify_synthetic_audit_identity(profile)))
+
+
+@app.command("verify-provider-test-seam")
+def verify_provider_test_seam_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    typer.echo(render_json(verify_provider_test_seam(profile)))
+
+
+@app.command("verify-database-readback")
+def verify_database_readback_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+    run_marker: Annotated[str, typer.Option()] = "",
+) -> None:
+    typer.echo(render_json(verify_database_readback(profile, run_marker)))
+
+
+@app.command("plan-real-backend-journeys")
+def plan_real_backend_journeys_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(render_json(plan_real_backend_journeys(_guard_root(), candidate)))
+
+
+@app.command("run-real-backend-journeys")
+def run_real_backend_journeys_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    plan: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    report, report_path = run_real_backend_journeys(_guard_root(), candidate, plan)
+    typer.echo(
+        json.dumps(
+            {
+                "report_path": str(report_path),
+                "report": report.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("verify-real-backend-report")
+def verify_real_backend_report_command(
+    report: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    typer.echo(
+        json.dumps(
+            verify_real_backend_report(report),
             indent=2,
             sort_keys=True,
         )

@@ -103,3 +103,26 @@ uv run kratos-guard explain-report <phase2g-report>
 The offline journeys intercept fixture traffic and make no real backend or
 provider calls. A passing suite proves only the isolated fixture boundary; it
 does not authorise normal-profile promotion.
+
+## Phase 2H capped real-backend journeys
+
+Phase 2H binds a sealed behavioural candidate to an observed backend contract,
+synthetic identity, deterministic provider seam, read-only persistence
+readback, and immutable operation budget:
+
+```powershell
+uv run kratos-guard inspect-backend-contract --profile itzako
+uv run kratos-guard classify-protected-target-drift --baseline <exact-baseline> --current <exact-witness>
+uv run kratos-guard verify-synthetic-audit-identity --profile itzako
+uv run kratos-guard verify-provider-test-seam --profile itzako
+uv run kratos-guard verify-database-readback --profile itzako
+uv run kratos-guard plan-real-backend-journeys --candidate <exact-candidate>
+uv run kratos-guard run-real-backend-journeys --candidate <exact-candidate> --plan <exact-plan>
+uv run kratos-guard verify-real-backend-report --report <exact-report>
+uv run kratos-guard explain-report <phase2h-report>
+```
+
+Planning never selects a latest candidate. Dispatch remains fail-closed when a
+synthetic identity, isolated provider scenario seam, read-only database
+boundary, budget, or writer authority is missing. Phase 2H adds no promotion
+command and never uses the normal Chrome profile.
