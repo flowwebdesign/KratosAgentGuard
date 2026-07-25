@@ -176,7 +176,11 @@ def plan_extension_canary(
 ) -> BrowserLaunchPolicy:
     guard_root = guard_root.resolve()
     candidate = candidate.resolve()
-    candidate_root = guard_root / ".work" / "candidates"
+    candidate_root = (
+        guard_root / ".work" / "operational-baselines"
+        if _inside(candidate, guard_root / ".work" / "operational-baselines")
+        else guard_root / ".work" / "candidates"
+    )
     _assert_no_link_escape(candidate, candidate_root)
     extension = candidate / "artefact" / "extension"
     _assert_no_link_escape(extension, candidate)

@@ -43,3 +43,21 @@ uv run kratos-guard gate --profile itzako --level current-runtime-attestation --
 
 These commands are metadata-only. They do not launch or control Chrome, enable
 remote debugging, read sensitive browser databases, or execute promotion.
+
+## Phase 2E operational baseline
+
+Phase 2E seals the exact configured extension into a Guard-owned rollback
+baseline and designs—but never executes—a future promotion:
+
+```powershell
+uv run kratos-guard inspect-configured-source --profile itzako
+uv run kratos-guard test-extension-id-stability --profile itzako
+uv run kratos-guard seal-current-baseline --profile itzako
+uv run kratos-guard verify-current-baseline --baseline <exact-baseline>
+uv run kratos-guard canary-current-baseline --baseline <exact-baseline>
+uv run kratos-guard classify-reference-candidate --baseline <exact-baseline> --candidate <exact-candidate>
+uv run kratos-guard design-promotion --baseline <exact-baseline> --candidate-contract <exact-contract>
+```
+
+There is no implicit `latest` baseline and no command that promotes the
+normal-profile extension.

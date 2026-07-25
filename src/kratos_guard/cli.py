@@ -28,6 +28,16 @@ from kratos_guard.core.inspection_runner import inspect_target, verifier_identit
 from kratos_guard.core.loaded_evidence import validate_envelope
 from kratos_guard.core.manifests import generate_manifest
 from kratos_guard.core.path_security import ProtectedPath, SafeOutputPolicy
+from kratos_guard.core.phase2e import (
+    canary_current_baseline,
+    classify_reference_candidate,
+    inspect_configured_source,
+    load_phase2e_config,
+    promotion_design,
+    seal_current_baseline,
+    test_extension_id_stability,
+    verify_current_baseline,
+)
 from kratos_guard.core.sealed_build import (
     build_input_manifest,
     build_sealed_candidate,
@@ -47,6 +57,7 @@ from kratos_guard.core.signing import (
 from kratos_guard.models import CanaryReport, InspectionReport
 from kratos_guard.models.build import BuildAttestation
 from kratos_guard.models.current_profile import CurrentProfileIdentityReport
+from kratos_guard.models.phase2e import Phase2EReport
 from kratos_guard.projects.base import load_profile
 from kratos_guard.reporting.json_report import render_json, write_json
 from kratos_guard.reporting.markdown_report import render_markdown
@@ -276,7 +287,38 @@ def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     payload = report_path.read_text(encoding="utf-8")
-    if '"current_loaded_client_verdict"' in payload:
+    if '"baseline_attestation"' in payload:
+        phase2e_report = Phase2EReport.model_validate_json(payload)
+        typer.echo(
+            "\n".join(
+                [
+                    "# Kratos Agent Guard Phase 2E operational baseline",
+                    "",
+                    f"Baseline: {phase2e_report.baseline.baseline_id}",
+                    f"Payload: {phase2e_report.baseline.payload_manifest_hash}",
+                    f"Source authority: {phase2e_report.source_authority.verdict}",
+                    f"Behavioural state: {phase2e_report.baseline.behavioural_state}",
+                    "ID stability: "
+                    + (
+                        phase2e_report.id_stability.verdict
+                        if phase2e_report.id_stability
+                        else "UNPROVEN"
+                    ),
+                    "Isolated runtime: "
+                    + str(phase2e_report.isolated_canary.get("qualified_verdict", "UNPROVEN")),
+                    "Reference candidate: "
+                    + str(
+                        phase2e_report.reference_candidate_classification.get("verdict", "UNPROVEN")
+                    ),
+                    f"Promotion design: {phase2e_report.promotion_transaction.verdict}",
+                    f"Golden journeys: {len(phase2e_report.golden_journeys)}",
+                    f"First blocker: {phase2e_report.first_remaining_blocker}",
+                    "",
+                    "This report does not authorise or execute normal-profile promotion.",
+                ]
+            )
+        )
+    elif '"current_loaded_client_verdict"' in payload:
         current_report = CurrentProfileIdentityReport.model_validate_json(payload)
         extension = (
             current_report.configured_extensions[0]
@@ -592,6 +634,72 @@ def promotion_readiness_command(
     if profile != "itzako":
         raise typer.BadParameter("only the itzako profile is supported")
     typer.echo(render_json(inspect_current_profile(_guard_root(), candidate).promotion_readiness))
+
+
+@app.command("inspect-configured-source")
+def inspect_configured_source_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    if profile != "itzako":
+        raise typer.BadParameter("only the itzako profile is supported")
+    config = load_phase2e_config(_guard_root())
+    typer.echo(render_json(inspect_configured_source(Path(config["extension_path"]))))
+
+
+@app.command("test-extension-id-stability")
+def test_extension_id_stability_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    if profile != "itzako":
+        raise typer.BadParameter("only the itzako profile is supported")
+    typer.echo(render_json(test_extension_id_stability(_guard_root())))
+
+
+@app.command("seal-current-baseline")
+def seal_current_baseline_command(
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    if profile != "itzako":
+        raise typer.BadParameter("only the itzako profile is supported")
+    typer.echo(render_json(seal_current_baseline(_guard_root())))
+
+
+@app.command("verify-current-baseline")
+def verify_current_baseline_command(
+    baseline: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(json.dumps(verify_current_baseline(baseline, _guard_root()), indent=2))
+
+
+@app.command("canary-current-baseline")
+def canary_current_baseline_command(
+    baseline: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(json.dumps(canary_current_baseline(_guard_root(), baseline), indent=2))
+
+
+@app.command("classify-reference-candidate")
+def classify_reference_candidate_command(
+    baseline: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(json.dumps(classify_reference_candidate(baseline, candidate), indent=2))
+
+
+@app.command("design-promotion")
+def design_promotion_command(
+    baseline: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    candidate_contract: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    report = Phase2EReport.model_validate_json(
+        (baseline / "evidence" / "phase2e-report.json").read_text("utf-8")
+    )
+    contract = json.loads(candidate_contract.read_text("utf-8"))
+    if contract.get("verdict") != "SUCCESSOR_CANDIDATE_CONTRACT_DEFINED":
+        raise typer.BadParameter("candidate contract is not valid")
+    typer.echo(
+        render_json(promotion_design(report.baseline, report.rollback_package, report.id_stability))
+    )
 
 
 @canary_app.command("plan-extension")
