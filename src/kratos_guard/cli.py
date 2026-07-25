@@ -19,6 +19,11 @@ from kratos_guard.core.browser_canary import (
     run_extension_canary,
     verify_runtime_readback,
 )
+from kratos_guard.core.current_profile import (
+    discover_browser_processes,
+    discover_browser_profiles,
+    inspect_current_profile,
+)
 from kratos_guard.core.inspection_runner import inspect_target, verifier_identity
 from kratos_guard.core.loaded_evidence import validate_envelope
 from kratos_guard.core.manifests import generate_manifest
@@ -173,6 +178,47 @@ def gate(
     profile: Annotated[str, typer.Option()] = "itzako",
     candidate: Annotated[Path | None, typer.Option(exists=True, file_okay=False)] = None,
 ) -> None:
+    current_levels = {
+        "current-profile-path",
+        "current-configured-client",
+        "current-worker",
+        "current-runtime-attestation",
+        "promotion-readiness",
+    }
+    if level in current_levels:
+        if candidate is None:
+            raise typer.BadParameter("--candidate is required for current-profile gates")
+        current_report = inspect_current_profile(_guard_root(), candidate)
+        state = "PROVEN"
+        if level == "current-profile-path":
+            reason = "CURRENT_PROFILE_PATH_PROVEN"
+        elif (
+            level == "current-configured-client" and len(current_report.configured_extensions) == 1
+        ):
+            reason = "CURRENT_CONFIGURED_EXTENSION_PROVEN"
+        elif level == "promotion-readiness":
+            reason = current_report.promotion_readiness.verdict
+        else:
+            state = "UNPROVEN"
+            reason = (
+                current_report.passive_worker_observation
+                if level == "current-worker"
+                else current_report.current_runtime_attestation_verdict
+            )
+        typer.echo(
+            json.dumps(
+                {
+                    "gate_id": level,
+                    "state": state,
+                    "reason": reason,
+                    "first_failing_boundary": ""
+                    if state == "PROVEN"
+                    else current_report.first_failing_boundary,
+                },
+                indent=2,
+            )
+        )
+        raise typer.Exit(0 if state == "PROVEN" else 2)
     if level == "canary-runtime":
         if candidate is None:
             raise typer.BadParameter("--candidate is required for canary-runtime")
@@ -465,6 +511,57 @@ def browser_discover_command() -> None:
             sort_keys=True,
         )
     )
+
+
+@app.command("inspect-browser-processes")
+def inspect_browser_processes_command() -> None:
+    typer.echo(
+        json.dumps(
+            [item.model_dump(mode="json") for item in discover_browser_processes()],
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("discover-browser-profiles")
+def discover_browser_profiles_command() -> None:
+    groups = discover_browser_processes()
+    typer.echo(
+        json.dumps(
+            [item.model_dump(mode="json") for item in discover_browser_profiles(groups)],
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("inspect-current-extension")
+def inspect_current_extension_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    if profile != "itzako":
+        raise typer.BadParameter("only the itzako profile is supported")
+    typer.echo(render_json(inspect_current_profile(_guard_root(), candidate)))
+
+
+@app.command("compare-current-extension")
+def compare_current_extension_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    inspect_current_extension_command(candidate, profile)
+
+
+@app.command("promotion-readiness")
+def promotion_readiness_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    profile: Annotated[str, typer.Option()] = "itzako",
+) -> None:
+    if profile != "itzako":
+        raise typer.BadParameter("only the itzako profile is supported")
+    typer.echo(render_json(inspect_current_profile(_guard_root(), candidate).promotion_readiness))
 
 
 @canary_app.command("plan-extension")

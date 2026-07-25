@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kratos-agent-guard"
-version = "0.4.0"
+version = "0.5.0"
 description = "Independent, read-only authority and runtime identity inspector"
 readme = "README.md"
 requires-python = ">=3.12"

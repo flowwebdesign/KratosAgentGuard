@@ -27,3 +27,19 @@ read-only observations only.
 
 Phase 2A gates are qualified. Source authority cannot satisfy build, runtime, or
 loaded-client gates without independently evidenced provenance links.
+
+## Phase 2D passive current-profile inspection
+
+Use an exact sealed candidate; there is no implicit `latest` selection:
+
+```powershell
+uv run kratos-guard inspect-browser-processes
+uv run kratos-guard discover-browser-profiles
+uv run kratos-guard inspect-current-extension --profile itzako --candidate <candidate>
+uv run kratos-guard compare-current-extension --profile itzako --candidate <candidate>
+uv run kratos-guard promotion-readiness --profile itzako --candidate <candidate>
+uv run kratos-guard gate --profile itzako --level current-runtime-attestation --candidate <candidate>
+```
+
+These commands are metadata-only. They do not launch or control Chrome, enable
+remote debugging, read sensitive browser databases, or execute promotion.
