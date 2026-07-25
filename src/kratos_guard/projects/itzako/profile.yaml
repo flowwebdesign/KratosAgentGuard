@@ -1,5 +1,7 @@
 name: itzako
 status: external_inspection_target
+verified_source_root: 'C:\Users\floww\Documents\Scripts\Study-Pilot'
+verified_git_common_directory: 'C:\Users\floww\Documents\Scripts\Study-Pilot\.git'
 expected_components:
   app:
     port: 3000
@@ -22,3 +24,33 @@ read_only_git_allowlist:
   - status
   - branch
   - remote
+safe_http_endpoints:
+  - url: http://127.0.0.1:8000/api/v1/health
+    method: GET
+    purpose: backend health only; not behavioural or build identity proof
+build_discovery_roots:
+  - Study_master/extension
+build_metadata_candidates:
+  - Study_master/extension/manifest.json
+  - Study_master/extension/buildInfo.js
+mutation_sentinels:
+  - docker-compose.yml
+  - Study_master/extension/manifest.json
+  - Study_master/extension/buildInfo.js
+  - Study_master_dashboard/package.json
+  - Study_master_backend/pyproject.toml
+source_exclusions:
+  - _agent_runs
+  - .runtime
+  - coverage
+  - verification_artifacts
+protected_roots:
+  - .
+  - .git
+limits:
+  source_max_files: 12000
+  source_max_bytes: 300000000
+  artifact_max_files: 500
+  artifact_max_bytes: 25000000
+  discovery_max_depth: 3
+  discovery_max_candidates: 50

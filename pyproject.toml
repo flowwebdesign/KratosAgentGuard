@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kratos-agent-guard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Independent, read-only authority and runtime identity inspector"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "flowwebdesign" }]
 dependencies = [
+  "psutil>=6.1,<8",
   "pydantic>=2.10,<3",
   "pyyaml>=6.0,<7",
   "typer>=0.15,<1",
@@ -22,6 +23,7 @@ dev = [
   "mypy>=1.14",
   "pytest>=8.3",
   "ruff>=0.8",
+  "types-psutil>=7.0",
 ]
 
 [project.scripts]

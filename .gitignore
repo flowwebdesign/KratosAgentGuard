@@ -8,3 +8,6 @@ __pycache__/
 .mypy_cache/
 evidence/inspections/*
 !evidence/inspections/.gitkeep
+evidence/development/phase2a-baseline/*.json
+evidence/imported/*
+!evidence/imported/.gitkeep
