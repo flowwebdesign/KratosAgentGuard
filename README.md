@@ -16,6 +16,10 @@ uv run kratos-guard source-manifest --target C:\path\to\target --profile itzako
 uv run kratos-guard discover-artifacts --target C:\path\to\target --profile itzako
 uv run kratos-guard inspect-runtime --profile itzako
 uv run kratos-guard gate --target C:\path\to\target --profile itzako --level source
+uv run kratos-guard key initialise
+uv run kratos-guard key export-public
+uv run kratos-guard build-plan --target C:\path\to\target --profile itzako --component extension
+uv run kratos-guard build-sealed-candidate --target C:\path\to\target --profile itzako --component extension
 ```
 
 Inspection does not grant permission to modify a target. Phase 1 adapters expose
