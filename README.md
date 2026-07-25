@@ -84,3 +84,22 @@ uv run kratos-guard explain-report <phase2f-report>
 The compatibility successor changes only version and provenance identity
 metadata. It performs no normal-profile promotion and leaves behavioural
 readiness explicitly unproven.
+
+## Phase 2G first behavioural successor
+
+Phase 2G imports the exact Phase 2F lineage into one independent, remote-free
+development repository and permits one bounded fix:
+`WRONG_LANGUAGE_AUTOMATIC_EXPLANATION_RECOVERY`.
+
+```powershell
+uv run kratos-guard import-successor-bundle --bundle <exact-bundle> --destination "C:\Users\floww\Documents\Itzako Extension Successor"
+uv run kratos-guard analyse-behavioural-impact --repository "C:\Users\floww\Documents\Itzako Extension Successor" --fix wrong-language-automatic-recovery
+uv run kratos-guard run-offline-golden-journeys --candidate <exact-candidate> --suite itzako-extension
+uv run kratos-guard verify-behavioural-successor --base-candidate <phase2f-candidate> --candidate <phase2g-candidate>
+uv run kratos-guard bundle-behavioural-lineage --repository "C:\Users\floww\Documents\Itzako Extension Successor"
+uv run kratos-guard explain-report <phase2g-report>
+```
+
+The offline journeys intercept fixture traffic and make no real backend or
+provider calls. A passing suite proves only the isolated fixture boundary; it
+does not authorise normal-profile promotion.

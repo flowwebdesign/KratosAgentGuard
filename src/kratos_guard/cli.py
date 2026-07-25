@@ -47,6 +47,13 @@ from kratos_guard.core.phase2f import (
     verify_lineage_attestation,
     verify_reconciliation_workspace,
 )
+from kratos_guard.core.phase2g import (
+    analyse_behavioural_impact,
+    bundle_behavioural_lineage,
+    compare_behavioural_successor,
+    import_successor_bundle,
+    run_offline_golden_journeys,
+)
 from kratos_guard.core.sealed_build import (
     build_input_manifest,
     build_sealed_candidate,
@@ -301,7 +308,30 @@ def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     payload = report_path.read_text(encoding="utf-8")
-    if '"successor_candidate"' in payload:
+    if '"phase": "2G"' in payload:
+        phase2g_report = json.loads(payload)
+        typer.echo(
+            "\n".join(
+                [
+                    "# Kratos Agent Guard Phase 2G behavioural successor",
+                    "",
+                    f"Qualified verdict: {phase2g_report['final_verdict']}",
+                    f"Authorised fix: {phase2g_report['authorised_fix']}",
+                    f"Durable source: {phase2g_report['development_repository']}",
+                    f"Development commit: {phase2g_report['development_commit']}",
+                    f"Candidate: {phase2g_report['candidate_id']}",
+                    f"Isolated runtime: {phase2g_report['isolated_runtime']}",
+                    f"Offline journeys: {phase2g_report['offline_journeys']}",
+                    f"Behavioural delta: {phase2g_report['behavioural_delta']}",
+                    f"Real backend: {phase2g_report['real_backend']}",
+                    f"Promotion authority: {phase2g_report['promotion_authority']}",
+                    f"First blocker: {phase2g_report['first_remaining_blocker']}",
+                    "",
+                    "Fixture proof does not imply real-backend or normal-profile proof.",
+                ]
+            )
+        )
+    elif '"successor_candidate"' in payload:
         phase2f_report = Phase2FReport.model_validate_json(payload)
         typer.echo(
             "\n".join(
@@ -839,6 +869,59 @@ def compare_successor_baseline_command(
     candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
 ) -> None:
     typer.echo(render_json(compare_successor_baseline(baseline, candidate)))
+
+
+@app.command("import-successor-bundle")
+def import_successor_bundle_command(
+    bundle: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    destination: Annotated[Path, typer.Option(file_okay=False)],
+) -> None:
+    typer.echo(
+        json.dumps(
+            import_successor_bundle(bundle, destination),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("analyse-behavioural-impact")
+def analyse_behavioural_impact_command(
+    repository: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    fix: Annotated[str, typer.Option()],
+) -> None:
+    typer.echo(render_json(analyse_behavioural_impact(repository, fix)))
+
+
+@app.command("run-offline-golden-journeys")
+def run_offline_golden_journeys_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    suite: Annotated[str, typer.Option()] = "itzako-extension",
+) -> None:
+    if suite != "itzako-extension":
+        raise typer.BadParameter("suite must be itzako-extension")
+    typer.echo(render_json(run_offline_golden_journeys(_guard_root(), candidate)))
+
+
+@app.command("verify-behavioural-successor")
+def verify_behavioural_successor_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    base_candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(render_json(compare_behavioural_successor(base_candidate, candidate)))
+
+
+@app.command("bundle-behavioural-lineage")
+def bundle_behavioural_lineage_command(
+    repository: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    typer.echo(
+        json.dumps(
+            bundle_behavioural_lineage(_guard_root(), repository),
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @canary_app.command("plan-extension")
