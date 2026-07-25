@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kratos-agent-guard"
+version = "0.1.0"
+description = "Independent, read-only authority and runtime identity inspector"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "flowwebdesign" }]
+dependencies = [
+  "pydantic>=2.10,<3",
+  "pyyaml>=6.0,<7",
+  "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "mypy>=1.14",
+  "pytest>=8.3",
+  "ruff>=0.8",
+]
+
+[project.scripts]
+kratos-guard = "kratos_guard.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kratos_guard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["kratos_guard"]
+
+[[tool.mypy.overrides]]
+module = "yaml"
+ignore_missing_imports = true

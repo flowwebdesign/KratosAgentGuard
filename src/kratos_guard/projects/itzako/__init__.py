@@ -1,0 +1,1 @@
+"""Itzako external-target adapter."""

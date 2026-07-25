@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "gate": "BOOTSTRAP_RIGHT_VERSION_GATE",
+  "component": "Kratos Agent Guard bootstrap",
+  "remote_authority": "flowwebdesign/KratosAgentGuard",
+  "remote_url": "https://github.com/flowwebdesign/KratosAgentGuard",
+  "expected_remote_state": "empty repository",
+  "observed_remote_refs": [],
+  "local_path": "C:\\Users\\floww\\Documents\\Kratos Agent Guard",
+  "local_path_exists": true,
+  "local_path_initial_contents": [],
+  "local_path_attributes": [
+    "Directory"
+  ],
+  "local_git_worktree_before_bootstrap": false,
+  "parent_git_worktree": false,
+  "study_pilot_git_containment": false,
+  "existing_kratos_guard_source": false,
+  "itzako_extension_relationship": "external inspection target only",
+  "verdict": "PASS_TO_BOOTSTRAP",
+  "target_writes": 0,
+  "target_process_restarts": 0,
+  "target_database_writes": 0,
+  "target_browser_changes": 0
+}

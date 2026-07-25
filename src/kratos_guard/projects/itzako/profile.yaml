@@ -1,0 +1,24 @@
+name: itzako
+status: external_inspection_target
+expected_components:
+  app:
+    port: 3000
+  backend:
+    port: 8000
+  dashboard:
+    port: 3011
+prior_context:
+  loaded_extension_build_id: extension-1.1.17-8e9f11feeaa6f684
+  evidence_state: UNPROVEN
+  provenance: user-supplied prior context; not independently observed
+protected_actions:
+  - target_file_write
+  - process_restart
+  - browser_change
+  - database_write
+  - provider_call
+read_only_git_allowlist:
+  - rev-parse
+  - status
+  - branch
+  - remote

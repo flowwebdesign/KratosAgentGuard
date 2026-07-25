@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "component": "Kratos Agent Guard",
+  "repository_root": "C:\\Users\\floww\\Documents\\Kratos Agent Guard",
+  "git_directory": "C:\\Users\\floww\\Documents\\Kratos Agent Guard\\.git",
+  "git_common_directory": "C:\\Users\\floww\\Documents\\Kratos Agent Guard\\.git",
+  "branch": "main",
+  "head_state_at_establishment": "UNBORN",
+  "origin_fetch": "https://github.com/flowwebdesign/KratosAgentGuard",
+  "origin_push": "https://github.com/flowwebdesign/KratosAgentGuard",
+  "study_pilot_git_common_directory": "C:\\Users\\floww\\Documents\\Scripts\\Study-Pilot\\.git",
+  "independent_from_study_pilot": true,
+  "verdict": "PASS_ESTABLISHED"
+}
