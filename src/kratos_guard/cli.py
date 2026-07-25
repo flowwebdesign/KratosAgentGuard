@@ -46,6 +46,7 @@ from kratos_guard.core.signing import (
 )
 from kratos_guard.models import CanaryReport, InspectionReport
 from kratos_guard.models.build import BuildAttestation
+from kratos_guard.models.current_profile import CurrentProfileIdentityReport
 from kratos_guard.projects.base import load_profile
 from kratos_guard.reporting.json_report import render_json, write_json
 from kratos_guard.reporting.markdown_report import render_markdown
@@ -275,7 +276,36 @@ def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     payload = report_path.read_text(encoding="utf-8")
-    if '"runtime_verification"' in payload:
+    if '"current_loaded_client_verdict"' in payload:
+        current_report = CurrentProfileIdentityReport.model_validate_json(payload)
+        extension = (
+            current_report.configured_extensions[0]
+            if len(current_report.configured_extensions) == 1
+            else None
+        )
+        typer.echo(
+            "\n".join(
+                [
+                    "# Kratos Agent Guard current Chrome profile",
+                    "",
+                    f"Qualified verdict: {current_report.current_loaded_client_verdict}",
+                    f"User-data root: {current_report.selected_user_data_root}",
+                    f"Profile: {current_report.selected_profile}",
+                    f"Configured extension count: {len(current_report.configured_extensions)}",
+                    "Extension ID: "
+                    + (extension.installation.extension_id if extension else "UNPROVEN"),
+                    "Configured payload: "
+                    + (extension.artifact.payload_manifest_hash if extension else "UNPROVEN"),
+                    f"Worker observation: {current_report.passive_worker_observation}",
+                    f"Runtime attestation: {current_report.current_runtime_attestation_verdict}",
+                    f"Promotion readiness: {current_report.promotion_readiness.verdict}",
+                    f"First failing boundary: {current_report.first_failing_boundary}",
+                    "",
+                    "Configured profile state is not live-runtime attestation.",
+                ]
+            )
+        )
+    elif '"runtime_verification"' in payload:
         canary_report = CanaryReport.model_validate_json(payload)
         typer.echo(
             "\n".join(

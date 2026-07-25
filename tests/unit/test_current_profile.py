@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from kratos_guard.cli import app
 from kratos_guard.core.current_profile import (
     SAFETY_COUNTERS,
     _copy_verified,
@@ -235,3 +237,53 @@ def test_promotion_states_do_not_include_execution() -> None:
         "NOT_REQUIRED_ALREADY_MATCHES",
     }
     assert all("EXECUT" not in state for state in states)
+
+
+def test_explain_report_supports_current_profile_report(tmp_path: Path) -> None:
+    report = {
+        "schema_version": "1.0",
+        "run_id": "run",
+        "observed_at": "2026-07-25T00:00:00Z",
+        "residues": [],
+        "process_groups": [],
+        "profile_references": [],
+        "selected_user_data_root": r"C:\Chrome\User Data",
+        "selected_profile": "Default",
+        "profile_selection_evidence": ["Local State"],
+        "snapshot_files": [],
+        "configured_extensions": [],
+        "configured_extension_verdict": "CURRENT_CONFIGURED_EXTENSION_NOT_FOUND",
+        "existing_devtools_endpoint_verdict": "CURRENT_LIVE_RUNTIME_OBSERVATION_UNAVAILABLE",
+        "passive_worker_observation": "CURRENT_WORKER_UNOBSERVABLE",
+        "current_runtime_attestation_verdict": "CURRENT_LIVE_RUNTIME_ATTESTATION_UNPROVEN",
+        "current_loaded_client_verdict": "CURRENT_CONFIGURED_EXTENSION_NOT_FOUND",
+        "promotion_readiness": {
+            "current_extension_id": "",
+            "current_extension_path": "",
+            "current_payload_hash": "",
+            "current_attestation_state": "UNPROVEN",
+            "sealed_candidate_id": "candidate",
+            "exact_differences": [],
+            "normal_profile_process_state": "PASSIVE",
+            "rollback_requirements": [],
+            "extension_id_stability_considerations": [],
+            "profile_restart_required": "UNKNOWN",
+            "developer_mode_involved": "UNKNOWN",
+            "required_human_approval": True,
+            "required_pre_promotion_backup": [],
+            "required_post_promotion_runtime_attestation": True,
+            "required_rollback_verification": True,
+            "required_behavioural_golden_journeys": [],
+            "blockers": ["CONFIGURED_EXTENSION_NOT_FOUND"],
+            "verdict": "BLOCKED_CURRENT_IDENTITY_AMBIGUOUS",
+        },
+        "first_failing_boundary": "CONFIGURED_EXTENSION_NOT_FOUND",
+        "safety_counters": {},
+        "limitations": [],
+    }
+    path = tmp_path / "current-profile.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    result = CliRunner().invoke(app, ["explain-report", str(path)])
+    assert result.exit_code == 0
+    assert "CURRENT_CONFIGURED_EXTENSION_NOT_FOUND" in result.stdout
+    assert "Configured profile state is not live-runtime attestation." in result.stdout
