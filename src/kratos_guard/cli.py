@@ -64,6 +64,26 @@ from kratos_guard.core.phase2h import (
     verify_real_backend_report,
     verify_synthetic_audit_identity,
 )
+from kratos_guard.core.phase2i import (
+    acquire_audit_writer_lease,
+    bundle_backend_audit_lineage,
+    inspect_audit_writer_leases,
+    inspect_backend_audit_authority,
+    inspect_backend_audit_build,
+    inspect_backend_audit_runtime,
+    release_audit_writer_lease,
+    start_backend_audit_runtime,
+    stop_backend_audit_runtime,
+    verify_audit_provider_scenarios,
+    verify_backend_audit_database,
+    verify_phase2i_synthetic_audit_identity,
+)
+from kratos_guard.core.phase2i_journeys import (
+    explain_phase2i_report,
+    plan_isolated_real_backend_journeys,
+    run_isolated_real_backend_journeys,
+    verify_phase2i_report,
+)
 from kratos_guard.core.sealed_build import (
     build_input_manifest,
     build_sealed_candidate,
@@ -318,7 +338,9 @@ def explain_report(
     report_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     payload = report_path.read_text(encoding="utf-8")
-    if '"phase": "2H"' in payload:
+    if '"schema_version": "kratos-guard.phase2i-report.v1"' in payload:
+        typer.echo(json.dumps(explain_phase2i_report(report_path), indent=2, sort_keys=True))
+    elif '"phase": "2H"' in payload:
         phase2h_report = json.loads(payload)
         budget = phase2h_report["budget"]
         typer.echo(
@@ -1032,6 +1054,212 @@ def verify_real_backend_report_command(
             sort_keys=True,
         )
     )
+
+
+@app.command("provision-backend-audit-authority")
+def provision_backend_audit_authority_command(
+    source_commit: Annotated[str, typer.Option()],
+    destination: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    """Verify the explicitly named existing isolated backend authority."""
+
+    result = inspect_backend_audit_authority(destination, source_commit)
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.verdict == "BACKEND_AUDIT_SOURCE_AUTHORITY_PROVEN" else 3)
+
+
+@app.command("bundle-backend-audit-lineage")
+def bundle_backend_audit_lineage_command(
+    repository: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_directory: Annotated[Path, typer.Option(file_okay=False)],
+) -> None:
+    result = bundle_backend_audit_lineage(_guard_root(), repository, output_directory)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@app.command("verify-backend-audit-build")
+def verify_backend_audit_build_command(
+    attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    lineage_attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    result = inspect_backend_audit_build(_guard_root(), attestation, lineage_attestation)
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.verdict == "BACKEND_AUDIT_BUILD_PROVEN" else 3)
+
+
+@app.command("verify-backend-audit-database")
+def verify_backend_audit_database_command(
+    container: Annotated[str, typer.Option()] = "kag-phase2i-postgres",
+) -> None:
+    database, roles = verify_backend_audit_database(container)
+    typer.echo(
+        json.dumps(
+            {
+                "database": database.model_dump(mode="json"),
+                "roles": [role.model_dump(mode="json") for role in roles],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    proven = database.verdict == "AUDIT_DATABASE_ISOLATION_PROVEN" and all(
+        role.verdict in {"AUDIT_BACKEND_ROLE_PROVEN", "AUDIT_READONLY_ROLE_PROVEN"}
+        for role in roles
+    )
+    raise typer.Exit(0 if proven else 3)
+
+
+@app.command("verify-phase2i-synthetic-audit-identity")
+def verify_phase2i_synthetic_audit_identity_command() -> None:
+    result = verify_phase2i_synthetic_audit_identity()
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.verdict == "SYNTHETIC_AUDIT_IDENTITY_PROVEN" else 3)
+
+
+@app.command("verify-audit-provider-scenarios")
+def verify_audit_provider_scenarios_command(
+    repository: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+) -> None:
+    scenarios = verify_audit_provider_scenarios(repository)
+    typer.echo(
+        json.dumps(
+            {
+                "scenario_version": scenarios[0].scenario_version,
+                "scenarios": [item.model_dump(mode="json") for item in scenarios],
+                "verdict": "DETERMINISTIC_PROVIDER_SEAM_PROVEN",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("inspect-audit-writer-leases")
+def inspect_audit_writer_leases_command() -> None:
+    typer.echo(
+        json.dumps(
+            [item.model_dump(mode="json") for item in inspect_audit_writer_leases()],
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("acquire-audit-writer-lease")
+def acquire_audit_writer_lease_command(
+    candidate: Annotated[str, typer.Option()],
+    run_marker: Annotated[str, typer.Option()],
+    backend_build_id: Annotated[str, typer.Option()],
+    ttl_seconds: Annotated[int, typer.Option(min=600, max=3600)] = 1800,
+    expected_activity: Annotated[int, typer.Option(min=0)] = 0,
+) -> None:
+    result = acquire_audit_writer_lease(
+        candidate,
+        run_marker,
+        backend_build_id,
+        ttl_seconds=ttl_seconds,
+        expected_activity=expected_activity,
+    )
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.verdict == "AUDIT_WRITER_LEASE_PROVEN" else 3)
+
+
+@app.command("release-audit-writer-lease")
+def release_audit_writer_lease_command(
+    lease: Annotated[str, typer.Option()],
+    terminal_outcome: Annotated[str, typer.Option()],
+) -> None:
+    result = release_audit_writer_lease(lease, terminal_outcome)
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("start-backend-audit-runtime")
+def start_backend_audit_runtime_command(
+    attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    lineage_attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    runtime_directory: Annotated[Path, typer.Option(file_okay=False)],
+) -> None:
+    build = inspect_backend_audit_build(_guard_root(), attestation, lineage_attestation)
+    runtime, owner_path = start_backend_audit_runtime(_guard_root(), build, runtime_directory)
+    typer.echo(
+        json.dumps(
+            {
+                "runtime": runtime.model_dump(mode="json"),
+                "owner_path": str(owner_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    raise typer.Exit(0 if runtime.verdict == "BACKEND_AUDIT_RUNTIME_PROVEN" else 3)
+
+
+@app.command("inspect-backend-audit-runtime")
+def inspect_backend_audit_runtime_command(
+    attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    lineage_attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    build = inspect_backend_audit_build(_guard_root(), attestation, lineage_attestation)
+    runtime = inspect_backend_audit_runtime(build)
+    typer.echo(runtime.model_dump_json(indent=2))
+    raise typer.Exit(0 if runtime.verdict == "BACKEND_AUDIT_RUNTIME_PROVEN" else 3)
+
+
+@app.command("stop-backend-audit-runtime")
+def stop_backend_audit_runtime_command(
+    owner: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    typer.echo(json.dumps(stop_backend_audit_runtime(owner), indent=2, sort_keys=True))
+
+
+@app.command("plan-isolated-real-backend-journeys")
+def plan_isolated_real_backend_journeys_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    lineage_attestation: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    runtime_owner: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    backend_repository: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    synthetic_user_id: Annotated[str, typer.Option()],
+) -> None:
+    result = plan_isolated_real_backend_journeys(
+        _guard_root(),
+        candidate,
+        attestation,
+        lineage_attestation,
+        runtime_owner,
+        backend_repository,
+        synthetic_user_id,
+    )
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.dispatch_authorised else 3)
+
+
+@app.command("run-isolated-real-backend-journeys")
+def run_isolated_real_backend_journeys_command(
+    candidate: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    lease: Annotated[str, typer.Option()],
+    plan: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    report, report_path = run_isolated_real_backend_journeys(_guard_root(), candidate, lease, plan)
+    typer.echo(
+        json.dumps(
+            {
+                "report": report.model_dump(mode="json"),
+                "report_path": str(report_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("verify-phase2i-report")
+def verify_phase2i_report_command(
+    report: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    result = verify_phase2i_report(report)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    raise typer.Exit(0 if result["verdict"] == "PHASE2I_REPORT_VERIFIED" else 3)
 
 
 @canary_app.command("plan-extension")

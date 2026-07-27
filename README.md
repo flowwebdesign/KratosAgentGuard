@@ -126,3 +126,28 @@ Planning never selects a latest candidate. Dispatch remains fail-closed when a
 synthetic identity, isolated provider scenario seam, read-only database
 boundary, budget, or writer authority is missing. Phase 2H adds no promotion
 command and never uses the normal Chrome profile.
+
+## Phase 2I isolated backend audit authority
+
+Phase 2I provisions an independent backend successor, dedicated PostgreSQL
+database, least-privilege roles, one synthetic identity, deterministic provider
+scenarios, and an exclusive audit writer lease. The sealed extension remains
+byte-identical; only Guard Chromium translates its canonical local origin to the
+isolated runtime:
+
+```powershell
+uv run kratos-guard provision-backend-audit-authority --source-commit <exact-commit> --destination <exact-repository>
+uv run kratos-guard verify-backend-audit-database
+uv run kratos-guard verify-phase2i-synthetic-audit-identity
+uv run kratos-guard verify-audit-provider-scenarios --repository <exact-repository>
+uv run kratos-guard acquire-audit-writer-lease --candidate <exact-candidate-id> --run-marker <exact-marker> --backend-build-id <exact-build>
+uv run kratos-guard start-backend-audit-runtime --attestation <exact-attestation> --lineage-attestation <exact-lineage-attestation> --runtime-directory <exact-directory>
+uv run kratos-guard plan-isolated-real-backend-journeys --candidate <exact-candidate> --attestation <exact-attestation> --lineage-attestation <exact-lineage-attestation> --runtime-owner <exact-owner> --backend-repository <exact-repository> --synthetic-user-id <exact-user>
+uv run kratos-guard run-isolated-real-backend-journeys --candidate <exact-candidate> --lease <exact-lease> --plan <exact-plan>
+uv run kratos-guard verify-phase2i-report --report <exact-report>
+uv run kratos-guard explain-report <exact-report>
+```
+
+Every candidate, build, owner, lease, plan, and report is selected explicitly.
+The qualified success verdict preserves canonical runtime, real provider, normal
+Chrome, and promotion as separate unproven boundaries.
