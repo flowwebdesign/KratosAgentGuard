@@ -1,10 +1,14 @@
 """Kratos Agent Guard command line interface."""
 
 import json
+import os
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import BaseModel
 
 from kratos_guard.adapters.docker import inspect_containers
 from kratos_guard.adapters.git import git_value
@@ -100,6 +104,15 @@ from kratos_guard.core.signing import (
     inspect_key,
     rotate_key,
 )
+from kratos_guard.core.standalone import (
+    append_ledger_entry,
+    compare_folder_snapshots,
+    create_synthetic_runtime_statement,
+    issue_runtime_challenge,
+    snapshot_folder,
+    verify_ledger,
+    verify_runtime_statement,
+)
 from kratos_guard.models import CanaryReport, InspectionReport
 from kratos_guard.models.build import BuildAttestation
 from kratos_guard.models.current_profile import CurrentProfileIdentityReport
@@ -108,6 +121,12 @@ from kratos_guard.models.phase2f import (
     IsolatedCloneIdentity,
     Phase2FReport,
     ReconciliationLineage,
+)
+from kratos_guard.models.standalone import (
+    FolderSnapshot,
+    RuntimeChallenge,
+    RuntimeStatement,
+    StandaloneStatus,
 )
 from kratos_guard.projects.base import load_profile
 from kratos_guard.reporting.json_report import render_json, write_json
@@ -118,9 +137,15 @@ app = typer.Typer(no_args_is_help=True)
 key_app = typer.Typer(no_args_is_help=True)
 browser_app = typer.Typer(no_args_is_help=True)
 canary_app = typer.Typer(no_args_is_help=True)
+ledger_app = typer.Typer(no_args_is_help=True)
+attestation_app = typer.Typer(no_args_is_help=True)
+monitor_app = typer.Typer(no_args_is_help=True)
 app.add_typer(key_app, name="key")
 app.add_typer(browser_app, name="browser")
 app.add_typer(canary_app, name="canary")
+app.add_typer(ledger_app, name="ledger")
+app.add_typer(attestation_app, name="attestation")
+app.add_typer(monitor_app, name="monitor")
 
 
 def _guard_root() -> Path:
@@ -138,6 +163,21 @@ def _output_policy(target: Path) -> SafeOutputPolicy:
             ProtectedPath(path=str(common_path), reason="target Git common directory"),
         ],
     )
+
+
+def _guard_output(path: Path) -> Path:
+    policy = SafeOutputPolicy(verifier_root=str(_guard_root()))
+    return policy.require_safe(path)
+
+
+def _write_model(path: Path, model: BaseModel) -> None:
+    destination = _guard_output(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    rendered = model.model_dump_json(indent=2)
+    with destination.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(rendered + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 @app.command()
@@ -1313,3 +1353,220 @@ def verify_runtime_readback_command(
     result = verify_runtime_readback(candidate, runtime_payload, runtime_hash, _guard_root())
     typer.echo(render_json(result))
     raise typer.Exit(0 if result.state.value == "PROVEN" else 3)
+
+
+@ledger_app.command("append")
+def ledger_append_command(
+    event_type: Annotated[str, typer.Option()],
+    subject: Annotated[str, typer.Option()],
+    payload_json: Annotated[str, typer.Option()] = "{}",
+    ledger: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    destination = ledger or _guard_root() / "evidence" / "standalone" / "ledger.jsonl"
+    destination = _guard_output(destination)
+    payload = json.loads(payload_json)
+    if not isinstance(payload, dict):
+        raise typer.BadParameter("payload-json must decode to an object")
+    entry = append_ledger_entry(destination, event_type, subject, payload)
+    typer.echo(render_json(entry))
+
+
+@ledger_app.command("verify")
+def ledger_verify_command(
+    trust_key: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    ledger: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    source = ledger or _guard_root() / "evidence" / "standalone" / "ledger.jsonl"
+    result = verify_ledger(source, trust_key)
+    typer.echo(render_json(result))
+    raise typer.Exit(0 if result.verdict == "PASS_LEDGER_VERIFIED" else 3)
+
+
+@attestation_app.command("issue")
+def attestation_issue_command(
+    subject: Annotated[str, typer.Option()],
+    output: Annotated[Path | None, typer.Option()] = None,
+    expected_build_id: Annotated[str, typer.Option()] = "",
+    expected_artifact_sha256: Annotated[str | None, typer.Option()] = None,
+    ttl_seconds: Annotated[int, typer.Option(min=1, max=3600)] = 300,
+) -> None:
+    challenge = issue_runtime_challenge(
+        subject,
+        expected_build_id=expected_build_id,
+        expected_artifact_sha256=expected_artifact_sha256,
+        ttl_seconds=ttl_seconds,
+    )
+    destination = output or (
+        _guard_root()
+        / "evidence"
+        / "standalone"
+        / "challenges"
+        / f"{challenge.challenge_id}.json"
+    )
+    _write_model(destination, challenge)
+    typer.echo(render_json(challenge))
+
+
+@attestation_app.command("synthetic-produce")
+def attestation_synthetic_produce_command(
+    challenge_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    artifact_root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output_directory: Annotated[Path | None, typer.Option()] = None,
+    build_id: Annotated[str, typer.Option()] = "",
+) -> None:
+    challenge = RuntimeChallenge.model_validate_json(challenge_path.read_text(encoding="utf-8"))
+    output_root = output_directory or (
+        _guard_root() / "evidence" / "standalone" / "synthetic" / challenge.challenge_id
+    )
+    output_root = _output_policy(artifact_root).require_safe(output_root)
+    trust_path = output_root / "producer-trust.pub.json"
+    statement = create_synthetic_runtime_statement(
+        challenge,
+        artifact_root,
+        trust_path,
+        build_id=build_id,
+    )
+    statement_path = output_root / "runtime-statement.json"
+    _write_model(statement_path, statement)
+    typer.echo(
+        json.dumps(
+            {
+                "producer_scope": statement.producer_scope,
+                "producer_trust_path": str(trust_path),
+                "statement": statement.model_dump(mode="json"),
+                "statement_path": str(statement_path),
+                "user_loaded_runtime_claim": "UNPROVEN_SYNTHETIC_SCOPE",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@attestation_app.command("verify")
+def attestation_verify_command(
+    challenge_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    statement_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    guard_trust_key: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    producer_trust_key: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    replay_directory: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    challenge = RuntimeChallenge.model_validate_json(challenge_path.read_text(encoding="utf-8"))
+    statement = RuntimeStatement.model_validate_json(statement_path.read_text(encoding="utf-8"))
+    replay_root = replay_directory or _guard_root() / "evidence" / "standalone" / "replay"
+    replay_root = _guard_output(replay_root)
+    result = verify_runtime_statement(
+        challenge,
+        statement,
+        guard_trust_key,
+        producer_trust_key,
+        replay_root,
+    )
+    typer.echo(render_json(result))
+    raise typer.Exit(0 if result.verdict.startswith("PASS_") else 3)
+
+
+@monitor_app.command("snapshot")
+def monitor_snapshot_command(
+    root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    output: Annotated[Path | None, typer.Option()] = None,
+    max_files: Annotated[int, typer.Option(min=1, max=100_000)] = 5000,
+    max_file_bytes: Annotated[int, typer.Option(min=1)] = 10_000_000,
+) -> None:
+    snapshot = snapshot_folder(root, max_files=max_files, max_file_bytes=max_file_bytes)
+    if output is not None:
+        destination = _output_policy(root).require_safe(output)
+        _write_model(destination, snapshot)
+    typer.echo(render_json(snapshot))
+
+
+@monitor_app.command("compare")
+def monitor_compare_command(
+    baseline_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    current_path: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+) -> None:
+    baseline = FolderSnapshot.model_validate_json(baseline_path.read_text(encoding="utf-8"))
+    current = FolderSnapshot.model_validate_json(current_path.read_text(encoding="utf-8"))
+    result = compare_folder_snapshots(baseline, current)
+    typer.echo(render_json(result))
+    raise typer.Exit(0 if result.verdict == "PASS_NO_FOLDER_DRIFT" else 2)
+
+
+@monitor_app.command("watch")
+def monitor_watch_command(
+    root: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    ledger: Annotated[Path | None, typer.Option()] = None,
+    interval_seconds: Annotated[float, typer.Option(min=0.1, max=60.0)] = 5.0,
+    iterations: Annotated[int, typer.Option(min=1, max=1000)] = 1,
+) -> None:
+    ledger_path = ledger or _guard_root() / "evidence" / "standalone" / "ledger.jsonl"
+    ledger_path = _output_policy(root).require_safe(ledger_path)
+    baseline = snapshot_folder(root)
+    append_ledger_entry(
+        ledger_path,
+        "folder.monitor.started",
+        str(root.resolve()),
+        {"manifest_sha256": baseline.manifest_sha256, "file_count": baseline.file_count},
+    )
+    drift_count = 0
+    for index in range(1, iterations):
+        time.sleep(interval_seconds)
+        current = snapshot_folder(root)
+        comparison = compare_folder_snapshots(baseline, current)
+        if comparison.verdict != "PASS_NO_FOLDER_DRIFT":
+            drift_count += 1
+            append_ledger_entry(
+                ledger_path,
+                "folder.drift.detected",
+                str(root.resolve()),
+                comparison.model_dump(mode="json"),
+            )
+        baseline = current
+        typer.echo(
+            json.dumps(
+                {"iteration": index + 1, "manifest_sha256": current.manifest_sha256}
+            )
+        )
+    typer.echo(
+        json.dumps(
+            {
+                "drift_events": drift_count,
+                "iterations": iterations,
+                "ledger": str(ledger_path),
+                "verdict": "PASS_MONITOR_COMPLETED",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("standalone-status")
+def standalone_status_command() -> None:
+    identity = verifier_identity()
+    try:
+        signing_state = inspect_key().storage.state
+    except (FileNotFoundError, PermissionError, ValueError) as error:
+        signing_state = str(error)
+    ledger_path = _guard_root() / "evidence" / "standalone" / "ledger.jsonl"
+    ledger_state = "PRESENT_UNVERIFIED" if ledger_path.is_file() else "NOT_INITIALISED"
+    status = StandaloneStatus(
+        observed_at=datetime.now(UTC),
+        guard_repository=identity.repository_root,
+        guard_head=identity.head,
+        guard_branch=identity.branch,
+        guard_dirty=identity.dirty,
+        signing_key_state=signing_state,
+        evidence_ledger_state=ledger_state,
+        configured_folder_state="NOT_CONFIGURED",
+        runtime_attestation_state="PROTOCOL_AVAILABLE_UNATTESTED",
+        current_user_loaded_runtime_state="UNPROVEN",
+        limitations=[
+            "No external target is configured or inspected by this command.",
+            "Synthetic producer proof cannot establish a user's loaded runtime identity.",
+            "A target must independently implement the challenge-response protocol "
+            "for runtime proof.",
+        ],
+        verdict="PASS_STANDALONE_GUARD_AVAILABLE",
+    )
+    typer.echo(render_json(status))

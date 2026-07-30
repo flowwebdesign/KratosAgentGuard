@@ -9,6 +9,16 @@ from kratos_guard.models.identity import (
     TargetSourceIdentity,
     VerifierIdentity,
 )
+from kratos_guard.models.standalone import (
+    FolderComparison,
+    FolderSnapshot,
+    LedgerEntry,
+    LedgerVerification,
+    RuntimeAttestationVerification,
+    RuntimeChallenge,
+    RuntimeStatement,
+    StandaloneStatus,
+)
 from kratos_guard.models.state import EvidenceState
 from kratos_guard.models.verdict import GateResult, InspectionReport
 
@@ -19,8 +29,16 @@ __all__ = [
     "GateResult",
     "HashEvidence",
     "InspectionReport",
+    "FolderComparison",
+    "FolderSnapshot",
+    "LedgerEntry",
+    "LedgerVerification",
     "Observation",
     "RuntimeProofScope",
+    "RuntimeAttestationVerification",
+    "RuntimeChallenge",
+    "RuntimeStatement",
+    "StandaloneStatus",
     "TargetBuildIdentity",
     "TargetLoadedClientIdentity",
     "TargetRuntimeIdentity",

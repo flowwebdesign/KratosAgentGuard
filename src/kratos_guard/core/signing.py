@@ -246,6 +246,45 @@ def verify_attestation_signature(
     )
 
 
+def sign_payload_bytes(payload: bytes) -> tuple[SigningKeyIdentity, str]:
+    """Sign canonical bytes with the established Guard trust root."""
+    identity = inspect_key()
+    private = serialization.load_pem_private_key(
+        Path(identity.private_key_path).read_bytes(), password=None
+    )
+    if not isinstance(private, Ed25519PrivateKey):
+        raise ValueError("KEY_MISMATCH")
+    signature = private.sign(payload)
+    return identity, base64.b64encode(signature).decode()
+
+
+def verify_payload_signature(
+    payload: bytes,
+    signature: str,
+    trusted_key_path: Path,
+    expected_key_id: str,
+) -> SignatureEvidence:
+    """Verify canonical bytes against an explicit public trust-root file."""
+    trust, public = load_trusted_public_key(trusted_key_path)
+    signature_state = "SIGNATURE_INVALID"
+    try:
+        public.verify(base64.b64decode(signature, validate=True), payload)
+        signature_state = "SIGNATURE_VALID"
+    except (ValueError, InvalidSignature):
+        pass
+    signer_state = (
+        "TRUST_ROOT_PROVEN" if trust.key_id == expected_key_id else "SIGNER_UNTRUSTED"
+    )
+    return SignatureEvidence(
+        algorithm="Ed25519",
+        key_id=expected_key_id,
+        payload_sha256=sha256(payload).hexdigest(),
+        signature=signature,
+        signature_state=signature_state,
+        signer_trust_state=signer_state,
+    )
+
+
 def rotate_key(reason: str) -> SigningKeyIdentity:
     if not reason.strip():
         raise ValueError("rotation reason is required")
