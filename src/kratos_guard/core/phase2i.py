@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +17,9 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
+
+if sys.platform == "win32":
+    from subprocess import CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW
 
 import psutil
 from cryptography.exceptions import InvalidSignature
@@ -46,6 +50,12 @@ EXPECTED_SCOPE = "audit:golden-journeys"
 EXPECTED_RUNTIME_ENDPOINT = "http://127.0.0.1:18000"
 SECRET_NAMESPACE = "phase2i-audit-authority"
 AUDIT_PYTHON_DEFAULT = Path(r"C:\Python314\python.exe")
+
+
+def _runtime_creationflags() -> int:
+    if sys.platform == "win32":
+        return CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    return 0
 
 SCENARIO_DEFINITIONS = (
     AuditScenarioDefinition(
@@ -876,9 +886,7 @@ def start_backend_audit_runtime(
         "--port",
         "18000",
     ]
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    creationflags = _runtime_creationflags()
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         process = subprocess.Popen(
             command,

@@ -12,3 +12,5 @@ evidence/inspections/*
 evidence/development/phase2a-baseline/*.json
 evidence/imported/*
 !evidence/imported/.gitkeep
+evidence/standalone/*
+!evidence/standalone/.gitkeep

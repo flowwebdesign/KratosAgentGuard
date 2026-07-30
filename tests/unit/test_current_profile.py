@@ -1,7 +1,7 @@
 """Phase 2D privacy, identity, non-inference, and promotion safety tests."""
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from typer.testing import CliRunner
@@ -78,6 +78,11 @@ def test_browser_products_are_classified_separately(
     path: str, expected: BrowserProductIdentity
 ) -> None:
     assert classify_browser(Path(path), []) is expected
+
+
+def test_windows_chrome_path_classifies_with_posix_path_semantics() -> None:
+    executable = PurePosixPath(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    assert classify_browser(executable, []) is BrowserProductIdentity.GOOGLE_CHROME
 
 
 def test_playwright_owned_branded_chrome_is_not_normal_profile_evidence() -> None:

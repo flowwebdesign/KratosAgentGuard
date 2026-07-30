@@ -28,6 +28,43 @@ read-only observations only.
 Phase 2A gates are qualified. Source authority cannot satisfy build, runtime, or
 loaded-client gates without independently evidenced provenance links.
 
+## Standalone operational mode
+
+The Guard can now operate without a configured product target. This mode keeps
+all evidence under the Guard repository and provides four independent controls:
+
+- a signed, hash-linked JSONL evidence ledger;
+- short-lived, signed runtime challenges with replay rejection;
+- a Guard-owned synthetic producer for exercising the protocol end to end;
+- passive, bounded folder snapshots and drift monitoring.
+
+Initialise and export the Guard trust root once, then exercise the standalone
+protocol against a Guard-owned fixture folder:
+
+```powershell
+uv run --frozen kratos-guard key initialise
+uv run --frozen kratos-guard key export-public
+uv run --frozen kratos-guard standalone-status
+uv run --frozen kratos-guard attestation issue --subject guard-fixture --output evidence\standalone\example\challenge.json
+uv run --frozen kratos-guard attestation synthetic-produce --challenge-path evidence\standalone\example\challenge.json --artifact-root C:\path\to\fixture --output-directory evidence\standalone\example\synthetic
+uv run --frozen kratos-guard attestation verify --challenge-path evidence\standalone\example\challenge.json --statement-path evidence\standalone\example\synthetic\runtime-statement.json --guard-trust-key <guard-public-key> --producer-trust-key evidence\standalone\example\synthetic\producer-trust.pub.json
+uv run --frozen kratos-guard monitor snapshot --root C:\path\to\fixture --output evidence\standalone\example\snapshot.json
+uv run --frozen kratos-guard monitor watch --root C:\path\to\fixture --iterations 10
+uv run --frozen kratos-guard ledger verify --trust-key <guard-public-key>
+```
+
+`attestation synthetic-produce` creates an ephemeral producer key and persists
+only its public trust record. A successful synthetic verification proves the
+challenge, signature, freshness, artifact identity, and replay controls. It
+does **not** prove which extension or service worker is loaded in a user's
+normal browser profile. That state remains `UNPROVEN_SYNTHETIC_SCOPE` until an
+external runtime independently implements the protocol and returns a signed
+statement.
+
+Every command that observes a folder rejects evidence output inside that
+folder. Standalone commands do not discover, start, stop, or modify browsers,
+services, databases, providers, or product repositories.
+
 ## Phase 2D passive current-profile inspection
 
 Use an exact sealed candidate; there is no implicit `latest` selection:

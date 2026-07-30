@@ -14,9 +14,13 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+
+if sys.platform == "win32":
+    from ctypes import WinDLL, WinError
 
 
 class _DataBlob(ctypes.Structure):
@@ -70,52 +74,59 @@ def _blob(data: bytes) -> tuple[_DataBlob, object]:
     return _DataBlob(len(data), buffer), buffer
 
 
-def _protect(data: bytes) -> bytes:
-    if os.name != "nt":
-        raise RuntimeError("WINDOWS_DPAPI_REQUIRED")
-    source, source_buffer = _blob(data)
-    del source_buffer
-    target = _DataBlob()
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
-    if not crypt32.CryptProtectData(
-        ctypes.byref(source),
-        "Kratos Agent Guard local secret",
-        None,
-        None,
-        None,
-        0x01,
-        ctypes.byref(target),
-    ):
-        raise ctypes.WinError()
-    try:
-        return ctypes.string_at(target.pbData, target.cbData)
-    finally:
-        kernel32.LocalFree(target.pbData)
+if sys.platform == "win32":
 
+    def _protect(data: bytes) -> bytes:
+        source, source_buffer = _blob(data)
+        del source_buffer
+        target = _DataBlob()
+        crypt32 = WinDLL("crypt32", use_last_error=True)
+        kernel32 = WinDLL("kernel32", use_last_error=True)
+        if not crypt32.CryptProtectData(
+            ctypes.byref(source),
+            "Kratos Agent Guard local secret",
+            None,
+            None,
+            None,
+            0x01,
+            ctypes.byref(target),
+        ):
+            raise WinError()
+        try:
+            return ctypes.string_at(target.pbData, target.cbData)
+        finally:
+            kernel32.LocalFree(target.pbData)
 
-def _unprotect(data: bytes) -> bytes:
-    if os.name != "nt":
+    def _unprotect(data: bytes) -> bytes:
+        source, source_buffer = _blob(data)
+        del source_buffer
+        target = _DataBlob()
+        crypt32 = WinDLL("crypt32", use_last_error=True)
+        kernel32 = WinDLL("kernel32", use_last_error=True)
+        if not crypt32.CryptUnprotectData(
+            ctypes.byref(source),
+            None,
+            None,
+            None,
+            None,
+            0x01,
+            ctypes.byref(target),
+        ):
+            raise WinError()
+        try:
+            return ctypes.string_at(target.pbData, target.cbData)
+        finally:
+            kernel32.LocalFree(target.pbData)
+
+else:
+
+    def _protect(data: bytes) -> bytes:
+        del data
         raise RuntimeError("WINDOWS_DPAPI_REQUIRED")
-    source, source_buffer = _blob(data)
-    del source_buffer
-    target = _DataBlob()
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
-    if not crypt32.CryptUnprotectData(
-        ctypes.byref(source),
-        None,
-        None,
-        None,
-        None,
-        0x01,
-        ctypes.byref(target),
-    ):
-        raise ctypes.WinError()
-    try:
-        return ctypes.string_at(target.pbData, target.cbData)
-    finally:
-        kernel32.LocalFree(target.pbData)
+
+    def _unprotect(data: bytes) -> bytes:
+        del data
+        raise RuntimeError("WINDOWS_DPAPI_REQUIRED")
 
 
 def _namespace_path(namespace: str) -> Path:

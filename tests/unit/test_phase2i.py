@@ -369,6 +369,13 @@ def test_stop_runtime_refuses_canonical_backend_pid(tmp_path: Path) -> None:
         phase2i.stop_backend_audit_runtime(owner)
 
 
+def test_runtime_creationflags_are_zero_outside_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(phase2i.sys, "platform", "linux")
+    assert phase2i._runtime_creationflags() == 0
+
+
 def test_suite_report_requires_phase2i_marker() -> None:
     with pytest.raises(ValidationError):
         IsolatedRealBackendSuiteReport.model_validate(
