@@ -8,7 +8,7 @@ import re
 import shutil
 import stat
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 from uuid import uuid4
 
@@ -109,21 +109,22 @@ def redact_command(command: list[str]) -> list[str]:
     return redacted
 
 
-def classify_browser(executable: Path, command: list[str]) -> BrowserProductIdentity:
-    lowered = str(executable).casefold()
+def classify_browser(executable: PurePath, command: list[str]) -> BrowserProductIdentity:
+    lowered = str(executable).replace("\\", "/").casefold()
+    executable_name = lowered.rsplit("/", 1)[-1]
     joined = " ".join(command).casefold()
     if "chrome for testing" in lowered:
         return BrowserProductIdentity.CHROME_FOR_TESTING
     if (
         "playwright" in lowered
-        or ".work\\playwright-browsers" in lowered
+        or ".work/playwright-browsers" in lowered
         or "playwright_chromiumdev_profile-" in joined
         or ("--remote-debugging-pipe" in command and "--headless" in command)
     ):
         return BrowserProductIdentity.PLAYWRIGHT_CHROMIUM
-    if "microsoft\\edge" in lowered or executable.name.casefold() == "msedge.exe":
+    if "microsoft/edge" in lowered or executable_name == "msedge.exe":
         return BrowserProductIdentity.MICROSOFT_EDGE
-    if "google\\chrome\\application" in lowered and executable.name.casefold() == "chrome.exe":
+    if "google/chrome/application" in lowered and executable_name == "chrome.exe":
         return BrowserProductIdentity.GOOGLE_CHROME
     if "chromium" in lowered or "--type=" in joined:
         return BrowserProductIdentity.OTHER_CHROMIUM
