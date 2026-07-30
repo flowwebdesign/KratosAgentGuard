@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from kratos_guard.core import secret_store
 
 
@@ -35,3 +37,11 @@ def test_secret_store_rejects_path_like_namespace() -> None:
         assert str(exc) == "INVALID_SECRET_NAMESPACE"
     else:
         raise AssertionError("unsafe namespace accepted")
+
+
+@pytest.mark.skipif(secret_store.sys.platform == "win32", reason="non-Windows behavior")
+def test_dpapi_fails_closed_outside_windows() -> None:
+    with pytest.raises(RuntimeError, match="WINDOWS_DPAPI_REQUIRED"):
+        secret_store._protect(b"secret")
+    with pytest.raises(RuntimeError, match="WINDOWS_DPAPI_REQUIRED"):
+        secret_store._unprotect(b"protected")
