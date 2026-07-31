@@ -44,6 +44,7 @@ protocol against a Guard-owned fixture folder:
 ```powershell
 uv run --frozen kratos-guard key initialise
 uv run --frozen kratos-guard key export-public
+uv run --frozen kratos-guard ledger append --event-type guard.initialised --subject standalone
 uv run --frozen kratos-guard standalone-status
 uv run --frozen kratos-guard attestation issue --subject guard-fixture --output evidence\standalone\example\challenge.json
 uv run --frozen kratos-guard attestation synthetic-produce --challenge-path evidence\standalone\example\challenge.json --artifact-root C:\path\to\fixture --output-directory evidence\standalone\example\synthetic
@@ -56,7 +57,9 @@ uv run --frozen kratos-guard ledger verify --trust-key <guard-public-key>
 `attestation synthetic-produce` creates an ephemeral producer key and persists
 only its public trust record. A successful synthetic verification proves the
 challenge, signature, freshness, artifact identity, and replay controls. It
-does **not** prove which extension or service worker is loaded in a user's
+also consumes that challenge exactly once, regardless of later statement IDs
+or producer keys. It does **not** prove which extension or service worker is
+loaded in a user's
 normal browser profile. That state remains `UNPROVEN_SYNTHETIC_SCOPE` until an
 external runtime independently implements the protocol and returns a signed
 statement.
@@ -64,6 +67,12 @@ statement.
 Every command that observes a folder rejects evidence output inside that
 folder. Standalone commands do not discover, start, stop, or modify browsers,
 services, databases, providers, or product repositories.
+
+`standalone-status` fails closed unless the Guard identity is clean and proven,
+the private signing key is safely stored, and the ledger is cryptographically
+verified. It never treats a merely present ledger as ready. The native key
+store works on Windows and Linux; CI exercises the complete standalone CLI
+lifecycle on both platforms.
 
 ## Phase 2D passive current-profile inspection
 

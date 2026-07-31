@@ -10,10 +10,16 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
+import psutil
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from kratos_guard.core.signing import inspect_key, sign_payload_bytes, verify_payload_signature
+from kratos_guard.core.signing import (
+    inspect_key,
+    sign_payload_bytes,
+    verify_local_payload_signature,
+    verify_payload_signature,
+)
 from kratos_guard.models.standalone import (
     FolderComparison,
     FolderFileIdentity,
@@ -26,6 +32,7 @@ from kratos_guard.models.standalone import (
 )
 
 ZERO_HASH = "0" * 64
+DEFAULT_STALE_LOCK_SECONDS = 300
 DEFAULT_EXCLUDED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -63,24 +70,80 @@ def _ledger_hash(entry: LedgerEntry) -> str:
     return sha256(canonical_json_bytes(payload)).hexdigest()
 
 
+def _recover_stale_lock(path: Path, *, stale_after_seconds: int) -> bool:
+    """Remove only a well-formed, unchanged lock whose recorded process is gone."""
+    try:
+        observed = path.read_bytes()
+        payload = json.loads(observed)
+        process_id = int(payload["process_id"])
+        token = str(payload["token"])
+        created_at = datetime.fromisoformat(str(payload["created_at"]))
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    try:
+        int(token, 16)
+    except ValueError:
+        return False
+    if created_at.tzinfo is None or process_id < 1 or len(token) != 64:
+        return False
+    age_seconds = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds()
+    if age_seconds <= stale_after_seconds or psutil.pid_exists(process_id):
+        return False
+    try:
+        if path.read_bytes() != observed:
+            return False
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    return True
+
+
 @contextmanager
-def _exclusive_lock(path: Path) -> Iterator[None]:
+def _exclusive_lock(
+    path: Path, *, stale_after_seconds: int = DEFAULT_STALE_LOCK_SECONDS
+) -> Iterator[None]:
+    if stale_after_seconds < 1:
+        raise ValueError("stale_after_seconds must be positive")
     path.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(32)
+    descriptor: int | None = None
+    for attempt in range(2):
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            break
+        except FileExistsError as error:
+            if attempt == 0 and _recover_stale_lock(
+                path, stale_after_seconds=stale_after_seconds
+            ):
+                continue
+            raise RuntimeError(f"LOCK_ALREADY_HELD:{path}") from error
+    if descriptor is None:
+        raise RuntimeError(f"LOCK_ACQUISITION_FAILED:{path}")
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as error:
-        raise RuntimeError(f"LOCK_ALREADY_HELD:{path}") from error
-    try:
-        os.write(descriptor, f"pid={os.getpid()}\n".encode())
+        lock_payload = canonical_json_bytes(
+            {
+                "created_at": datetime.now(UTC).isoformat(),
+                "process_id": os.getpid(),
+                "token": token,
+            }
+        )
+        os.write(descriptor, lock_payload + b"\n")
         os.fsync(descriptor)
         os.close(descriptor)
+        descriptor = None
         yield
     finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
-            os.close(descriptor)
-        except OSError:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("token") == token:
+                path.unlink(missing_ok=True)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
             pass
-        path.unlink(missing_ok=True)
 
 
 def append_ledger_entry(
@@ -90,11 +153,13 @@ def append_ledger_entry(
     payload: dict[str, object],
     *,
     now: datetime | None = None,
+    stale_lock_seconds: int = DEFAULT_STALE_LOCK_SECONDS,
 ) -> LedgerEntry:
     """Append one signed, hash-linked JSONL record with an exclusive writer lock."""
     ledger_path = ledger_path.resolve()
     lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
-    with _exclusive_lock(lock_path):
+    with _exclusive_lock(lock_path, stale_after_seconds=stale_lock_seconds):
+        identity = inspect_key()
         previous_hash = ZERO_HASH
         sequence = 1
         if ledger_path.is_file():
@@ -107,9 +172,18 @@ def append_ledger_entry(
                     raise ValueError("LEDGER_CHAIN_INVALID")
                 if _ledger_hash(previous) != previous.entry_hash:
                     raise ValueError("LEDGER_ENTRY_INTEGRITY_INVALID")
+                signature = verify_local_payload_signature(
+                    _model_signing_bytes(previous),
+                    previous.signature,
+                    previous.signing_key_id,
+                )
+                if (
+                    signature.signature_state != "SIGNATURE_VALID"
+                    or signature.signer_trust_state != "TRUST_ROOT_PROVEN"
+                ):
+                    raise ValueError("LEDGER_ENTRY_SIGNATURE_INVALID")
                 previous_hash = previous.entry_hash
             sequence = len(lines) + 1
-        identity = inspect_key()
         entry = LedgerEntry(
             sequence=sequence,
             recorded_at=now or datetime.now(UTC),
@@ -417,13 +491,13 @@ def verify_runtime_statement(
         and statement.artifact_sha256 != challenge.expected_artifact_sha256
     ):
         blockers.append("ARTIFACT_SHA256_MISMATCH")
-    replay_root.mkdir(parents=True, exist_ok=True)
-    replay_marker = replay_root / f"{challenge.challenge_id}-{statement.statement_id}.json"
+    replay_marker = replay_root / f"{challenge.challenge_id}.json"
     replay_state = "UNUSED"
     if replay_marker.exists():
         replay_state = "REPLAY_DETECTED"
         blockers.append("ATTESTATION_REPLAY_DETECTED")
     if not blockers:
+        replay_root.mkdir(parents=True, exist_ok=True)
         try:
             descriptor = os.open(replay_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -433,6 +507,7 @@ def verify_runtime_statement(
             marker = canonical_json_bytes(
                 {
                     "challenge_id": challenge.challenge_id,
+                    "nonce_sha256": sha256(challenge.nonce.encode("utf-8")).hexdigest(),
                     "statement_id": statement.statement_id,
                     "verified_at": checked_at.isoformat(),
                 }

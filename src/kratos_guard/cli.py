@@ -596,8 +596,11 @@ def key_inspect() -> None:
 
 
 @key_app.command("export-public")
-def key_export_public() -> None:
-    trust = export_public_key(_guard_root() / "trust" / "keys")
+def key_export_public(
+    trust_directory: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    destination = _guard_output(trust_directory or _guard_root() / "trust" / "keys")
+    trust = export_public_key(destination)
     typer.echo(json.dumps(trust.model_dump(mode="json"), indent=2))
 
 
@@ -1542,14 +1545,64 @@ def monitor_watch_command(
 
 
 @app.command("standalone-status")
-def standalone_status_command() -> None:
+def standalone_status_command(
+    ledger: Annotated[Path | None, typer.Option()] = None,
+    trust_key: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False, readable=True)
+    ] = None,
+    configured_folder: Annotated[
+        Path | None, typer.Option(exists=True, file_okay=False, readable=True)
+    ] = None,
+) -> None:
     identity = verifier_identity()
+    blockers: list[str] = []
+    signing_identity = None
     try:
-        signing_state = inspect_key().storage.state
-    except (FileNotFoundError, PermissionError, ValueError) as error:
+        signing_identity = inspect_key()
+        signing_state = signing_identity.storage.state
+    except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as error:
         signing_state = str(error)
-    ledger_path = _guard_root() / "evidence" / "standalone" / "ledger.jsonl"
-    ledger_state = "PRESENT_UNVERIFIED" if ledger_path.is_file() else "NOT_INITIALISED"
+        blockers.append("SIGNING_TRUST_ROOT_UNPROVEN")
+    if signing_state != "TRUST_ROOT_PROVEN" and "SIGNING_TRUST_ROOT_UNPROVEN" not in blockers:
+        blockers.append("SIGNING_TRUST_ROOT_UNPROVEN")
+    if identity.state.value != "PROVEN":
+        blockers.append("GUARD_REPOSITORY_IDENTITY_UNPROVEN")
+    if identity.dirty:
+        blockers.append("GUARD_REPOSITORY_DIRTY")
+
+    ledger_path = (ledger or _guard_root() / "evidence" / "standalone" / "ledger.jsonl").resolve()
+    trusted_path = trust_key.resolve() if trust_key is not None else None
+    if trusted_path is None and signing_identity is not None:
+        candidate = (
+            _guard_root() / "trust" / "keys" / f"{signing_identity.key_id}.pub.json"
+        ).resolve()
+        if candidate.is_file():
+            trusted_path = candidate
+    ledger_count = 0
+    ledger_head = "0" * 64
+    if not ledger_path.is_file():
+        ledger_state = "NOT_INITIALISED"
+        blockers.append("EVIDENCE_LEDGER_NOT_INITIALISED")
+    elif trusted_path is None:
+        ledger_state = "PRESENT_TRUST_KEY_MISSING"
+        blockers.append("EVIDENCE_LEDGER_TRUST_KEY_MISSING")
+    else:
+        try:
+            ledger_verification = verify_ledger(ledger_path, trusted_path)
+        except (OSError, RuntimeError, ValueError):
+            ledger_state = "VERIFICATION_ERROR"
+            blockers.append("EVIDENCE_LEDGER_VERIFICATION_ERROR")
+        else:
+            ledger_state = ledger_verification.verdict
+            ledger_count = ledger_verification.entry_count
+            ledger_head = ledger_verification.head_hash
+            if ledger_verification.verdict != "PASS_LEDGER_VERIFIED":
+                blockers.append(ledger_verification.first_error or ledger_verification.verdict)
+
+    configured_state = (
+        "CONFIGURED_UNINSPECTED" if configured_folder is not None else "NOT_CONFIGURED"
+    )
+    verdict = "PASS_STANDALONE_GUARD_READY" if not blockers else "BLOCKED_STANDALONE_GUARD"
     status = StandaloneStatus(
         observed_at=datetime.now(UTC),
         guard_repository=identity.repository_root,
@@ -1558,15 +1611,24 @@ def standalone_status_command() -> None:
         guard_dirty=identity.dirty,
         signing_key_state=signing_state,
         evidence_ledger_state=ledger_state,
-        configured_folder_state="NOT_CONFIGURED",
+        evidence_ledger_entry_count=ledger_count,
+        evidence_ledger_head_hash=ledger_head,
+        trusted_key_path=str(trusted_path) if trusted_path is not None else "",
+        configured_folder_state=configured_state,
         runtime_attestation_state="PROTOCOL_AVAILABLE_UNATTESTED",
         current_user_loaded_runtime_state="UNPROVEN",
+        blockers=blockers,
         limitations=[
-            "No external target is configured or inspected by this command.",
+            (
+                "The configured folder is recorded but is not inspected by this command."
+                if configured_folder is not None
+                else "No external target is configured or inspected by this command."
+            ),
             "Synthetic producer proof cannot establish a user's loaded runtime identity.",
             "A target must independently implement the challenge-response protocol "
             "for runtime proof.",
         ],
-        verdict="PASS_STANDALONE_GUARD_AVAILABLE",
+        verdict=verdict,
     )
     typer.echo(render_json(status))
+    raise typer.Exit(0 if verdict.startswith("PASS_") else 3)

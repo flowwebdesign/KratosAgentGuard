@@ -1,5 +1,7 @@
 import json
+import os
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 import kratos_guard.core.signing as signing
 from kratos_guard.core.standalone import (
     append_ledger_entry,
+    canonical_json_bytes,
     compare_folder_snapshots,
     create_synthetic_runtime_statement,
     issue_runtime_challenge,
@@ -111,6 +114,22 @@ def test_missing_ledger_fails_closed(safe_key_store: Path, tmp_path: Path) -> No
     assert result.signature_state == "UNPROVEN"
 
 
+def test_ledger_append_rejects_rehashed_entry_with_invalid_signature(
+    safe_key_store: Path, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    append_ledger_entry(ledger, "guard.started", "standalone", {})
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["signature"] = "AAAA"
+    unsigned_hash_payload = dict(payload)
+    unsigned_hash_payload.pop("entry_hash")
+    payload["entry_hash"] = sha256(canonical_json_bytes(unsigned_hash_payload)).hexdigest()
+    ledger.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="LEDGER_ENTRY_SIGNATURE_INVALID"):
+        append_ledger_entry(ledger, "guard.refused", "standalone", {})
+
+
 def test_synthetic_challenge_response_verifies_but_not_as_loaded_user_runtime(
     safe_key_store: Path, tmp_path: Path
 ) -> None:
@@ -146,6 +165,37 @@ def test_synthetic_challenge_response_verifies_but_not_as_loaded_user_runtime(
     assert result.blockers == []
 
 
+def test_runtime_statement_key_substitution_fails_closed(
+    safe_key_store: Path, tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    artifact = tmp_path / "fixture"
+    artifact.mkdir()
+    challenge = issue_runtime_challenge("fixture", now=now)
+    correct_trust = tmp_path / "correct.pub.json"
+    substituted_trust = tmp_path / "substituted.pub.json"
+    statement = create_synthetic_runtime_statement(
+        challenge, artifact, correct_trust, now=now + timedelta(seconds=1)
+    )
+    create_synthetic_runtime_statement(
+        challenge, artifact, substituted_trust, now=now + timedelta(seconds=1)
+    )
+
+    result = verify_runtime_statement(
+        challenge,
+        statement,
+        guard_trust_path(tmp_path),
+        substituted_trust,
+        tmp_path / "replay",
+        now=now + timedelta(seconds=2),
+    )
+
+    assert result.verdict == "FAIL_RUNTIME_ATTESTATION"
+    assert result.producer_signature_state == "SIGNATURE_INVALID"
+    assert result.blockers == ["PRODUCER_SIGNATURE_INVALID"]
+    assert not (tmp_path / "replay").exists()
+
+
 def test_runtime_attestation_replay_is_rejected(safe_key_store: Path, tmp_path: Path) -> None:
     now = datetime.now(UTC)
     artifact = tmp_path / "fixture"
@@ -167,6 +217,124 @@ def test_runtime_attestation_replay_is_rejected(safe_key_store: Path, tmp_path: 
     assert first.verdict == "PASS_SYNTHETIC_RUNTIME_ATTESTATION"
     assert second.verdict == "FAIL_RUNTIME_ATTESTATION"
     assert "ATTESTATION_REPLAY_DETECTED" in second.blockers
+
+
+def test_runtime_challenge_cannot_be_reused_with_a_new_signed_statement(
+    safe_key_store: Path, tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    artifact = tmp_path / "fixture"
+    artifact.mkdir()
+    (artifact / "worker.js").write_text("fixture", encoding="utf-8")
+    challenge = issue_runtime_challenge("fixture", now=now)
+    first_trust = tmp_path / "producer-one.pub.json"
+    second_trust = tmp_path / "producer-two.pub.json"
+    first_statement = create_synthetic_runtime_statement(
+        challenge, artifact, first_trust, now=now + timedelta(seconds=1)
+    )
+    second_statement = create_synthetic_runtime_statement(
+        challenge, artifact, second_trust, now=now + timedelta(seconds=2)
+    )
+    assert first_statement.statement_id != second_statement.statement_id
+    replay = tmp_path / "replay"
+    guard_trust = guard_trust_path(tmp_path)
+
+    first = verify_runtime_statement(
+        challenge,
+        first_statement,
+        guard_trust,
+        first_trust,
+        replay,
+        now=now + timedelta(seconds=3),
+    )
+    second = verify_runtime_statement(
+        challenge,
+        second_statement,
+        guard_trust,
+        second_trust,
+        replay,
+        now=now + timedelta(seconds=4),
+    )
+
+    assert first.verdict == "PASS_SYNTHETIC_RUNTIME_ATTESTATION"
+    assert second.verdict == "FAIL_RUNTIME_ATTESTATION"
+    assert second.replay_state == "REPLAY_DETECTED"
+    assert second.blockers == ["ATTESTATION_REPLAY_DETECTED"]
+    assert list(replay.glob("*.json")) == [replay / f"{challenge.challenge_id}.json"]
+
+
+def test_stale_dead_process_ledger_lock_is_recovered(
+    safe_key_store: Path, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    lock = ledger.with_suffix(".jsonl.lock")
+    lock.write_text(
+        json.dumps(
+            {
+                "created_at": "2000-01-01T00:00:00+00:00",
+                "process_id": 2_147_483_647,
+                "token": "a" * 64,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    entry = append_ledger_entry(
+        ledger,
+        "guard.recovered",
+        "standalone",
+        {},
+        stale_lock_seconds=1,
+    )
+
+    assert entry.sequence == 1
+    assert not lock.exists()
+
+
+def test_live_process_ledger_lock_fails_closed(
+    safe_key_store: Path, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    lock = ledger.with_suffix(".jsonl.lock")
+    original = {
+        "created_at": "2000-01-01T00:00:00+00:00",
+        "process_id": os.getpid(),
+        "token": "b" * 64,
+    }
+    lock.write_text(json.dumps(original) + "\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="LOCK_ALREADY_HELD"):
+        append_ledger_entry(
+            ledger,
+            "guard.refused",
+            "standalone",
+            {},
+            stale_lock_seconds=1,
+        )
+
+    assert json.loads(lock.read_text(encoding="utf-8")) == original
+    assert not ledger.exists()
+
+
+def test_malformed_stale_ledger_lock_fails_closed(
+    safe_key_store: Path, tmp_path: Path
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    lock = ledger.with_suffix(".jsonl.lock")
+    lock.write_text("pid=unknown\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="LOCK_ALREADY_HELD"):
+        append_ledger_entry(
+            ledger,
+            "guard.refused",
+            "standalone",
+            {},
+            stale_lock_seconds=1,
+        )
+
+    assert lock.read_text(encoding="utf-8") == "pid=unknown\n"
+    assert not ledger.exists()
 
 
 def test_expired_or_wrong_build_attestation_fails_closed(

@@ -41,5 +41,8 @@ jobs:
       - name: Test
         run: uv run --frozen pytest -q
 
+      - name: Standalone CLI smoke
+        run: uv run --frozen python scripts/standalone_smoke.py --require-clean-status
+
       - name: Build distributions
         run: uv build

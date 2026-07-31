@@ -18,8 +18,8 @@ The verifier and producer remain separate identities:
 2. A producer returns the exact challenge identifier and nonce, plus build and
    artifact identities, in its own signed statement.
 3. Verification requires explicit Guard and producer public-key files.
-4. A successful statement consumes an exclusive replay marker in Guard-owned
-   evidence storage.
+4. The first successful statement atomically consumes an exclusive,
+   challenge-keyed replay marker in Guard-owned evidence storage.
 
 The bundled synthetic producer generates an ephemeral Ed25519 private key. The
 private key remains in memory and is never persisted; only the public trust
@@ -33,8 +33,30 @@ integrity hash over the signed entry. Appends use an exclusive writer lock and
 flush the entry to stable storage before releasing the lock.
 
 Verification checks the complete sequence, every link, every entry hash, every
-signature, and the exact trusted signer identity. Missing, malformed, tampered,
-reordered, or untrusted evidence fails closed.
+signature, and the exact trusted signer identity. Append also re-verifies every
+existing entry against the established local signing key before extending the
+chain. Missing, malformed, tampered, reordered, or untrusted evidence fails
+closed.
+
+Writer locks contain a random ownership token, process identity, and UTC
+creation time. Cleanup removes only the caller's own token. A well-formed lock
+older than five minutes may be recovered only when its recorded process no
+longer exists; live, recent, malformed, or changing locks remain fail-closed.
+
+## Fail-closed status
+
+`standalone-status` returns success only when all of these are true:
+
+- the Guard repository identity is proven and the working tree is clean;
+- the local signing key has a proven restrictive storage boundary;
+- the evidence ledger exists and every link and signature verifies against an
+  explicit or current exported public trust key.
+
+The status output includes the verified entry count, head hash, trust path, and
+exact blockers. A merely present ledger is never reported as ready. A
+configured folder is recorded as `CONFIGURED_UNINSPECTED`; status does not read
+it. Runtime attestation remains `PROTOCOL_AVAILABLE_UNATTESTED` until separately
+exercised, and the normal loaded-user runtime remains `UNPROVEN`.
 
 ## Passive folder monitoring
 
@@ -66,3 +88,7 @@ only the scope bound into that producer's trust contract. Until loaded-profile
 ownership and runtime binding are independently verified,
 `current_user_loaded_runtime_state` remains `UNPROVEN`,
 `UNPROVEN_EXTERNAL_ATTESTATION_SCOPE`, or `UNPROVEN_SYNTHETIC_SCOPE`.
+
+Each signed challenge is consumable exactly once. Re-signing a new statement
+with a new statement ID or producer key cannot reuse an already consumed
+challenge.

@@ -127,8 +127,8 @@ class FolderComparison(StrictModel):
 
 
 class StandaloneStatus(StrictModel):
-    schema_version: Literal["kratos-guard.standalone-status.v1"] = (
-        "kratos-guard.standalone-status.v1"
+    schema_version: Literal["kratos-guard.standalone-status.v2"] = (
+        "kratos-guard.standalone-status.v2"
     )
     observed_at: datetime
     guard_repository: str
@@ -137,8 +137,12 @@ class StandaloneStatus(StrictModel):
     guard_dirty: bool
     signing_key_state: str
     evidence_ledger_state: str
+    evidence_ledger_entry_count: int = Field(ge=0)
+    evidence_ledger_head_hash: Digest = Field(pattern=r"^[a-f0-9]{64}$")
+    trusted_key_path: str
     configured_folder_state: str
     runtime_attestation_state: str
     current_user_loaded_runtime_state: str
+    blockers: list[str] = Field(default_factory=list)
     limitations: list[str]
     verdict: str
