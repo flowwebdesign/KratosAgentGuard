@@ -117,8 +117,10 @@ from kratos_guard.core.signing import (
     export_trust_bundle,
     initialise_key,
     inspect_key,
+    local_trust_directory,
     revoke_key,
     rotate_key,
+    verify_key_rotation,
 )
 from kratos_guard.core.standalone import (
     append_ledger_entry,
@@ -1609,11 +1611,36 @@ def monitor_watch_command(
 def standalone_init_command(
     config: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
-    identity = initialise_key()
     configuration_path = (config or default_configuration_path()).resolve()
+    orphaned_default_ledger = configuration_path.parent / "evidence" / "ledger.jsonl"
+    if not configuration_path.is_file() and orphaned_default_ledger.is_file():
+        try:
+            inspect_key()
+        except FileNotFoundError as error:
+            raise RuntimeError("STANDALONE_LEDGER_PRIVATE_KEY_REQUIRED") from error
     configuration = initialise_configuration(configuration_path)
     ledger = Path(configuration.ledger_path)
-    if not ledger.is_file():
+    if ledger.is_file():
+        try:
+            identity = inspect_key()
+        except FileNotFoundError as error:
+            raise RuntimeError("STANDALONE_LEDGER_PRIVATE_KEY_REQUIRED") from error
+        verification = verify_ledger(ledger, Path(configuration.trust_directory))
+        if verification.verdict != "PASS_LEDGER_VERIFIED":
+            raise RuntimeError(
+                "STANDALONE_LEDGER_VERIFICATION_REQUIRED:"
+                + (verification.first_error or verification.verdict)
+            )
+        entries = [line for line in ledger.read_text(encoding="utf-8").splitlines() if line]
+        previous_key_id = str(json.loads(entries[-1])["signing_key_id"])
+        if identity.key_id != previous_key_id and not verify_key_rotation(
+            previous_key_id,
+            identity.key_id,
+            local_trust_directory(),
+        ):
+            raise RuntimeError("STANDALONE_LEDGER_ACTIVE_KEY_CONTINUITY_REQUIRED")
+    else:
+        identity = initialise_key()
         append_ledger_entry(
             ledger,
             "guard.initialised",

@@ -124,6 +124,24 @@ def test_standalone_status_blocks_corrupted_ledger_evidence(
     assert status["verdict"] == "BLOCKED_STANDALONE_GUARD"
 
 
+def test_standalone_init_rejects_an_existing_ledger_without_active_key_continuity(
+    standalone_cli: tuple[CliRunner, Path],
+) -> None:
+    runner, _ = standalone_cli
+    first = runner.invoke(cli.app, ["standalone", "init"])
+    assert first.exit_code == 0
+
+    private_key = Path(signing.inspect_key().private_key_path)
+    private_key.unlink()
+    replacement = signing.initialise_key()
+    assert replacement.key_id != json.loads(first.stdout)["key_id"]
+
+    repeated = runner.invoke(cli.app, ["standalone", "init"])
+    assert repeated.exit_code == 1
+    assert isinstance(repeated.exception, RuntimeError)
+    assert str(repeated.exception) == "STANDALONE_LEDGER_ACTIVE_KEY_CONTINUITY_REQUIRED"
+
+
 def test_v1_cli_complete_installed_lifecycle(
     standalone_cli: tuple[CliRunner, Path],
     tmp_path: Path,
