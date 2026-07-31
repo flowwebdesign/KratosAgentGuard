@@ -30,16 +30,50 @@ loaded-client gates without independently evidenced provenance links.
 
 ## Standalone operational mode
 
-The Guard can now operate without a configured product target. This mode keeps
-all evidence under the Guard repository and provides four independent controls:
+The v1 standalone product operates without a configured product target. It
+stores private state below the operating system's per-user data directory and
+writes evidence only below its configured evidence root.
+
+```powershell
+uv run --frozen kratos-guard standalone init
+uv run --frozen kratos-guard standalone folder add --path C:\path\to\observe --label source
+uv run --frozen kratos-guard standalone run --iterations 1
+uv run --frozen kratos-guard standalone status
+uv run --frozen kratos-guard standalone health
+uv run --frozen kratos-guard key rotate --reason scheduled-rotation
+uv run --frozen kratos-guard standalone evidence checkpoint
+uv run --frozen kratos-guard standalone evidence export --destination <evidence-root>\exports\evidence.zip
+uv run --frozen kratos-guard standalone evidence verify --bundle <evidence-root>\exports\evidence.zip --expected-trust-anchor-key-id <pinned-first-signer-key-id>
+uv run --frozen kratos-guard standalone evidence import --bundle C:\path\to\verified-evidence.zip --expected-trust-anchor-key-id <pinned-first-signer-key-id>
+uv run --frozen kratos-guard standalone service-template --kind windows --output .\Register-KratosAgentGuardTask.ps1
+```
+
+Omit `--iterations` to run continuously under an operator-selected supervisor.
+Systemd and Windows Task Scheduler templates are available under `packaging/`
+and through `standalone service-template`; they are never installed
+automatically. Review the generated template before enabling it.
+
+The standalone controls include:
 
 - a signed, hash-linked JSONL evidence ledger;
+- dual-signed multi-key rotation continuity and explicit historical revocation;
 - short-lived, signed runtime challenges with replay rejection;
 - a Guard-owned synthetic producer for exercising the protocol end to end;
-- passive, bounded folder snapshots and drift monitoring.
+- passive, bounded folder snapshots and drift monitoring;
+- explicit signed ledger checkpoints;
+- portable, independently verifiable and importable evidence bundles.
 
-Initialise and export the Guard trust root once, then exercise the standalone
-protocol against a Guard-owned fixture folder:
+Bundle verification and import require the first ledger signer key ID obtained
+through a separate trusted channel. A bundle without that external pin is
+reported as self-consistent but untrusted; signatures inside a bundle cannot
+authenticate the wholesale replacement of that same bundle.
+
+Release wheels and source archives are built twice with a fixed source epoch;
+publication stops unless the two builds are byte-identical. Each GitHub release
+includes SHA-256 checksums, an SPDX 2.3 dependency SBOM, and GitHub artifact
+attestations.
+
+Legacy standalone commands remain available for compatibility:
 
 ```powershell
 uv run --frozen kratos-guard key initialise
