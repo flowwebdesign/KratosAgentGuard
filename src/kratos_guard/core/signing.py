@@ -5,6 +5,8 @@ import getpass
 import json
 import os
 import subprocess
+import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -25,11 +27,28 @@ from kratos_guard.models.build import (
 )
 
 
-def key_store_root() -> Path:
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        raise RuntimeError("LOCALAPPDATA is required for the signing key store")
-    return Path(local) / "KratosAgentGuard" / "keys"
+def key_store_root(
+    *,
+    environment: Mapping[str, str] | None = None,
+    platform_name: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Return the native per-user data path for the Guard private key."""
+    current_environment = os.environ if environment is None else environment
+    current_platform = sys.platform if platform_name is None else platform_name
+    if current_platform == "win32":
+        local = current_environment.get("LOCALAPPDATA")
+        if not local:
+            raise RuntimeError("LOCALAPPDATA is required for the Windows signing key store")
+        return Path(local) / "KratosAgentGuard" / "keys"
+    user_home = Path.home() if home is None else home
+    if current_platform == "darwin":
+        return user_home / "Library" / "Application Support" / "KratosAgentGuard" / "keys"
+    xdg_data_home = current_environment.get("XDG_DATA_HOME")
+    data_home = Path(xdg_data_home) if xdg_data_home else user_home / ".local" / "share"
+    if not data_home.is_absolute():
+        raise RuntimeError("XDG_DATA_HOME must be an absolute path")
+    return data_home / "kratos-agent-guard" / "keys"
 
 
 def _fingerprint(public_bytes: bytes) -> str:
@@ -274,6 +293,37 @@ def verify_payload_signature(
         pass
     signer_state = (
         "TRUST_ROOT_PROVEN" if trust.key_id == expected_key_id else "SIGNER_UNTRUSTED"
+    )
+    return SignatureEvidence(
+        algorithm="Ed25519",
+        key_id=expected_key_id,
+        payload_sha256=sha256(payload).hexdigest(),
+        signature=signature,
+        signature_state=signature_state,
+        signer_trust_state=signer_state,
+    )
+
+
+def verify_local_payload_signature(
+    payload: bytes,
+    signature: str,
+    expected_key_id: str,
+) -> SignatureEvidence:
+    """Verify bytes against the currently established local Guard key."""
+    identity = inspect_key()
+    private = serialization.load_pem_private_key(
+        Path(identity.private_key_path).read_bytes(), password=None
+    )
+    if not isinstance(private, Ed25519PrivateKey):
+        raise ValueError("KEY_MISMATCH")
+    signature_state = "SIGNATURE_INVALID"
+    try:
+        private.public_key().verify(base64.b64decode(signature, validate=True), payload)
+        signature_state = "SIGNATURE_VALID"
+    except (ValueError, InvalidSignature):
+        pass
+    signer_state = (
+        "TRUST_ROOT_PROVEN" if identity.key_id == expected_key_id else "SIGNER_UNTRUSTED"
     )
     return SignatureEvidence(
         algorithm="Ed25519",

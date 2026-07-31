@@ -30,6 +30,42 @@ def safe_key_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def test_windows_key_store_uses_local_app_data() -> None:
+    local_app_data = Path("C:/Users/test/AppData/Local")
+    assert signing.key_store_root(
+        environment={"LOCALAPPDATA": str(local_app_data)},
+        platform_name="win32",
+        home=Path("C:/Users/test"),
+    ) == local_app_data / "KratosAgentGuard" / "keys"
+
+
+def test_linux_key_store_uses_xdg_data_home(tmp_path: Path) -> None:
+    data_home = tmp_path / "xdg"
+    assert signing.key_store_root(
+        environment={"XDG_DATA_HOME": str(data_home)},
+        platform_name="linux",
+        home=tmp_path / "home",
+    ) == data_home / "kratos-agent-guard" / "keys"
+
+
+def test_linux_key_store_has_native_home_fallback(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert signing.key_store_root(
+        environment={},
+        platform_name="linux",
+        home=home,
+    ) == home / ".local" / "share" / "kratos-agent-guard" / "keys"
+
+
+def test_linux_key_store_rejects_relative_xdg_data_home(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="XDG_DATA_HOME must be an absolute path"):
+        signing.key_store_root(
+            environment={"XDG_DATA_HOME": "relative"},
+            platform_name="linux",
+            home=tmp_path,
+        )
+
+
 def test_private_key_is_outside_repository(safe_key_store: Path, tmp_path: Path) -> None:
     identity = signing.inspect_key()
     assert Path(identity.private_key_path).is_relative_to(safe_key_store)
