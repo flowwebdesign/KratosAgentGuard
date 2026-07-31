@@ -107,8 +107,17 @@ def _is_reparse(path: Path) -> bool:
 
 def inspect_configured_source(extension_path: Path) -> ConfiguredExtensionSourceAuthority:
     extension_path = extension_path.resolve()
-    repository = Path(_git(extension_path, ["rev-parse", "--show-toplevel"]))
+    if not extension_path.is_dir():
+        raise FileNotFoundError("CONFIGURED_EXTENSION_PATH_REQUIRED")
+    repository_value = _git(extension_path, ["rev-parse", "--show-toplevel"])
+    if not repository_value:
+        raise ValueError("CONFIGURED_EXTENSION_GIT_REPOSITORY_REQUIRED")
+    repository = Path(repository_value).resolve()
+    if not _inside(extension_path, repository):
+        raise ValueError("CONFIGURED_EXTENSION_OUTSIDE_GIT_REPOSITORY")
     common = _git(repository, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if not common:
+        raise ValueError("CONFIGURED_EXTENSION_GIT_COMMON_DIRECTORY_REQUIRED")
     branch = _git(repository, ["branch", "--show-current"])
     head = _git(repository, ["rev-parse", "HEAD"])
     status = _git(repository, ["status", "--porcelain=v2", "--untracked-files=all"])

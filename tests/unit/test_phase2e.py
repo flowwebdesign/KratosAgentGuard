@@ -162,6 +162,19 @@ def test_source_authority_discovers_containing_repository_and_shared_common_dir(
     assert result.verdict == "CONFIGURED_EXTENSION_SOURCE_AUTHORITY_PARTIAL"
 
 
+def test_source_authority_rejects_a_missing_configured_extension_path(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="CONFIGURED_EXTENSION_PATH_REQUIRED"):
+        inspect_configured_source(tmp_path / "missing-extension")
+
+
+def test_source_authority_rejects_a_non_git_directory_without_falling_back(
+    tmp_path: Path,
+) -> None:
+    extension = extension_fixture(tmp_path / "not-a-repository")
+    with pytest.raises(ValueError, match="CONFIGURED_EXTENSION_GIT_REPOSITORY_REQUIRED"):
+        inspect_configured_source(extension)
+
+
 def test_operational_baseline_is_never_known_good() -> None:
     value = baseline()
     assert value.behavioural_state is EvidenceState.UNPROVEN
