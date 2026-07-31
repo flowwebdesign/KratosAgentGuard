@@ -1,0 +1,17 @@
+[Unit]
+Description=Kratos Agent Guard read-only standalone monitor
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/kratos-guard standalone run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/kratos-agent-guard
+
+[Install]
+WantedBy=default.target

@@ -31,6 +31,20 @@ from kratos_guard.core.current_profile import (
 from kratos_guard.core.inspection_runner import inspect_target, verifier_identity
 from kratos_guard.core.loaded_evidence import validate_envelope
 from kratos_guard.core.manifests import generate_manifest
+from kratos_guard.core.operations import (
+    create_ledger_checkpoint,
+    default_configuration_path,
+    export_evidence_bundle,
+    import_evidence_bundle,
+    initialise_configuration,
+    load_configuration,
+    monitor_health,
+    register_folder,
+    remove_folder,
+    run_monitor,
+    verify_evidence_bundle,
+    write_service_template,
+)
 from kratos_guard.core.path_security import ProtectedPath, SafeOutputPolicy
 from kratos_guard.core.phase2e import (
     canary_current_baseline,
@@ -100,8 +114,10 @@ from kratos_guard.core.sealed_build import (
 )
 from kratos_guard.core.signing import (
     export_public_key,
+    export_trust_bundle,
     initialise_key,
     inspect_key,
+    revoke_key,
     rotate_key,
 )
 from kratos_guard.core.standalone import (
@@ -140,12 +156,18 @@ canary_app = typer.Typer(no_args_is_help=True)
 ledger_app = typer.Typer(no_args_is_help=True)
 attestation_app = typer.Typer(no_args_is_help=True)
 monitor_app = typer.Typer(no_args_is_help=True)
+standalone_app = typer.Typer(no_args_is_help=True)
+folder_app = typer.Typer(no_args_is_help=True)
+evidence_app = typer.Typer(no_args_is_help=True)
 app.add_typer(key_app, name="key")
 app.add_typer(browser_app, name="browser")
 app.add_typer(canary_app, name="canary")
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(attestation_app, name="attestation")
 app.add_typer(monitor_app, name="monitor")
+app.add_typer(standalone_app, name="standalone")
+standalone_app.add_typer(folder_app, name="folder")
+standalone_app.add_typer(evidence_app, name="evidence")
 
 
 def _guard_root() -> Path:
@@ -605,9 +627,48 @@ def key_export_public(
 
 
 @key_app.command("rotate")
-def key_rotate(reason: Annotated[str, typer.Option()]) -> None:
-    identity = rotate_key(reason)
+def key_rotate(
+    reason: Annotated[str, typer.Option()],
+    trust_directory: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    destination = trust_directory
+    configuration_path = default_configuration_path()
+    if destination is None and configuration_path.is_file():
+        destination = Path(load_configuration(configuration_path).trust_directory)
+    identity = rotate_key(reason, destination)
     typer.echo(json.dumps({"new_key_id": identity.key_id, "rotated": True}))
+
+
+@key_app.command("revoke")
+def key_revoke(
+    key_id: Annotated[str, typer.Option()],
+    reason: Annotated[str, typer.Option()],
+    trust_directory: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    destination = trust_directory
+    configuration_path = default_configuration_path()
+    if destination is None and configuration_path.is_file():
+        destination = Path(load_configuration(configuration_path).trust_directory)
+    record = revoke_key(key_id, reason, destination)
+    typer.echo(record.model_dump_json(indent=2))
+
+
+@key_app.command("export-bundle")
+def key_export_bundle(
+    trust_directory: Annotated[Path, typer.Option()],
+) -> None:
+    exported = export_trust_bundle(trust_directory)
+    typer.echo(
+        json.dumps(
+            {
+                "exported_files": [str(path) for path in exported],
+                "file_count": len(exported),
+                "verdict": "PASS_TRUST_BUNDLE_EXPORTED",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 def _repository_manifest(target: Path, profile: str) -> tuple[dict[str, object], str]:
@@ -1537,6 +1598,260 @@ def monitor_watch_command(
                 "iterations": iterations,
                 "ledger": str(ledger_path),
                 "verdict": "PASS_MONITOR_COMPLETED",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@standalone_app.command("init")
+def standalone_init_command(
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    identity = initialise_key()
+    configuration_path = (config or default_configuration_path()).resolve()
+    configuration = initialise_configuration(configuration_path)
+    ledger = Path(configuration.ledger_path)
+    if not ledger.is_file():
+        append_ledger_entry(
+            ledger,
+            "guard.initialised",
+            "standalone",
+            {"configuration_schema": configuration.schema_version},
+        )
+    export_trust_bundle(Path(configuration.trust_directory))
+    typer.echo(
+        json.dumps(
+            {
+                "configuration": configuration.model_dump(mode="json"),
+                "configuration_path": str(configuration_path),
+                "key_id": identity.key_id,
+                "verdict": "PASS_STANDALONE_INITIALISED",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@folder_app.command("add")
+def standalone_folder_add_command(
+    path: Annotated[Path, typer.Option(exists=True, file_okay=False)],
+    label: Annotated[str, typer.Option()],
+    config: Annotated[Path | None, typer.Option()] = None,
+    max_files: Annotated[int, typer.Option(min=1, max=100_000)] = 5000,
+    max_file_bytes: Annotated[int, typer.Option(min=1)] = 10_000_000,
+    max_total_bytes: Annotated[int, typer.Option(min=1)] = 500_000_000,
+) -> None:
+    configuration_path = (config or default_configuration_path()).resolve()
+    record = register_folder(
+        configuration_path,
+        path,
+        label,
+        max_files=max_files,
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+    typer.echo(record.model_dump_json(indent=2))
+
+
+@folder_app.command("list")
+def standalone_folder_list_command(
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    configuration = load_configuration(config or default_configuration_path())
+    typer.echo(
+        json.dumps(
+            {
+                "folder_count": len(configuration.folders),
+                "folders": [
+                    item.model_dump(mode="json") for item in configuration.folders
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@folder_app.command("remove")
+def standalone_folder_remove_command(
+    folder_id: Annotated[str, typer.Option()],
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    removed = remove_folder(
+        (config or default_configuration_path()).resolve(), folder_id
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "folder_id": removed.folder_id,
+                "removed": True,
+                "verdict": "PASS_MONITORED_FOLDER_REMOVED",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@standalone_app.command("run")
+def standalone_run_command(
+    config: Annotated[Path | None, typer.Option()] = None,
+    iterations: Annotated[int, typer.Option(min=0)] = 0,
+) -> None:
+    result = run_monitor(
+        (config or default_configuration_path()).resolve(),
+        iterations=None if iterations == 0 else iterations,
+    )
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.verdict.startswith("PASS_") else 3)
+
+
+@standalone_app.command("health")
+def standalone_health_command(
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    result = monitor_health((config or default_configuration_path()).resolve())
+    typer.echo(result.model_dump_json(indent=2))
+    raise typer.Exit(0 if result.verdict.startswith("PASS_") else 3)
+
+
+@standalone_app.command("service-template")
+def standalone_service_template_command(
+    kind: Annotated[str, typer.Option()],
+    output: Annotated[Path, typer.Option()],
+) -> None:
+    destination = write_service_template(kind, output)
+    typer.echo(
+        json.dumps(
+            {
+                "kind": kind,
+                "template_path": str(destination),
+                "verdict": "PASS_SERVICE_TEMPLATE_WRITTEN",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@standalone_app.command("status")
+def installed_standalone_status_command(
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    configuration_path = (config or default_configuration_path()).resolve()
+    blockers: list[str] = []
+    try:
+        configuration = load_configuration(configuration_path)
+    except (FileNotFoundError, OSError, ValueError) as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "blockers": [str(error)],
+                    "configuration_path": str(configuration_path),
+                    "verdict": "BLOCKED_STANDALONE_NOT_INITIALISED",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(3) from error
+    try:
+        identity = inspect_key()
+        key_state = identity.storage.state
+    except (FileNotFoundError, OSError, PermissionError, RuntimeError, ValueError):
+        key_state = "UNPROVEN"
+        blockers.append("SIGNING_TRUST_ROOT_UNPROVEN")
+    ledger = verify_ledger(
+        Path(configuration.ledger_path), Path(configuration.trust_directory)
+    )
+    if ledger.verdict != "PASS_LEDGER_VERIFIED":
+        blockers.append(ledger.first_error or ledger.verdict)
+    if not configuration.folders:
+        blockers.append("NO_MONITORED_FOLDERS_CONFIGURED")
+    health = monitor_health(configuration_path)
+    if not health.verdict.startswith("PASS_"):
+        blockers.extend(health.blockers or [health.verdict])
+    verdict = "PASS_STANDALONE_V1_READY" if not blockers else "BLOCKED_STANDALONE_V1"
+    typer.echo(
+        json.dumps(
+            {
+                "blockers": blockers,
+                "configuration_path": str(configuration_path),
+                "configured_folder_count": len(configuration.folders),
+                "key_state": key_state,
+                "ledger": ledger.model_dump(mode="json"),
+                "monitor_health": health.model_dump(mode="json"),
+                "verdict": verdict,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    raise typer.Exit(0 if verdict.startswith("PASS_") else 3)
+
+
+@evidence_app.command("export")
+def standalone_evidence_export_command(
+    destination: Annotated[Path, typer.Option()],
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    exported = export_evidence_bundle(
+        (config or default_configuration_path()).resolve(), destination
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "bundle_path": str(exported),
+                "verdict": "PASS_EVIDENCE_BUNDLE_EXPORTED",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@evidence_app.command("verify")
+def standalone_evidence_verify_command(
+    bundle: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    expected_trust_anchor_key_id: Annotated[str, typer.Option()],
+) -> None:
+    verification = verify_evidence_bundle(
+        bundle,
+        expected_trust_anchor_key_id=expected_trust_anchor_key_id,
+    )
+    typer.echo(verification.model_dump_json(indent=2))
+    raise typer.Exit(0 if verification.verdict.startswith("PASS_") else 3)
+
+
+@evidence_app.command("checkpoint")
+def standalone_evidence_checkpoint_command(
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    checkpoint = create_ledger_checkpoint(
+        (config or default_configuration_path()).resolve()
+    )
+    typer.echo(json.dumps(checkpoint, indent=2, sort_keys=True))
+
+
+@evidence_app.command("import")
+def standalone_evidence_import_command(
+    bundle: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    expected_trust_anchor_key_id: Annotated[str, typer.Option()],
+    config: Annotated[Path | None, typer.Option()] = None,
+) -> None:
+    destination = import_evidence_bundle(
+        (config or default_configuration_path()).resolve(),
+        bundle,
+        expected_trust_anchor_key_id,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "imported_path": str(destination),
+                "verdict": "PASS_EVIDENCE_BUNDLE_IMPORTED",
             },
             indent=2,
             sort_keys=True,

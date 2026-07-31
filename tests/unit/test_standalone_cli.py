@@ -17,9 +17,13 @@ def standalone_cli(
 ) -> tuple[CliRunner, Path]:
     guard_root = tmp_path / "guard"
     guard_root.mkdir()
-    key_root = tmp_path / "keys"
+    key_root = tmp_path / "private" / "keys"
     monkeypatch.setattr(signing, "key_store_root", lambda: key_root)
-    monkeypatch.setattr(signing, "_restrict_key_directory", lambda path: path.mkdir(parents=True))
+    monkeypatch.setattr(
+        signing,
+        "_restrict_key_directory",
+        lambda path: path.mkdir(parents=True, exist_ok=True),
+    )
     original_assessment = signing.assess_key_storage
 
     def safe_assessment(path: Path | None = None):
@@ -118,3 +122,93 @@ def test_standalone_status_blocks_corrupted_ledger_evidence(
     assert status["evidence_ledger_state"] == "FAIL_LEDGER_VERIFICATION"
     assert status["blockers"] == ["ENTRY_HASH_INVALID:1"]
     assert status["verdict"] == "BLOCKED_STANDALONE_GUARD"
+
+
+def test_v1_cli_complete_installed_lifecycle(
+    standalone_cli: tuple[CliRunner, Path],
+    tmp_path: Path,
+) -> None:
+    runner, _ = standalone_cli
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "worker.js").write_text("v1", encoding="utf-8")
+
+    initialised = runner.invoke(cli.app, ["standalone", "init"])
+    assert initialised.exit_code == 0
+    initialised_payload = json.loads(initialised.stdout)
+    assert initialised_payload["verdict"] == "PASS_STANDALONE_INITIALISED"
+
+    added = runner.invoke(
+        cli.app,
+        [
+            "standalone",
+            "folder",
+            "add",
+            "--path",
+            str(fixture),
+            "--label",
+            "fixture",
+        ],
+    )
+    assert added.exit_code == 0
+    folder_id = json.loads(added.stdout)["folder_id"]
+
+    not_started = runner.invoke(cli.app, ["standalone", "status"])
+    assert not_started.exit_code == 3
+    not_started_payload = json.loads(not_started.stdout)
+    assert "MONITOR_NOT_STARTED" in not_started_payload["blockers"]
+
+    first_run = runner.invoke(
+        cli.app, ["standalone", "run", "--iterations", "1"]
+    )
+    assert first_run.exit_code == 0
+    assert json.loads(first_run.stdout)["verdict"] == "PASS_MONITOR_STOPPED_CLEANLY"
+
+    old_key_id = initialised_payload["key_id"]
+    rotated = runner.invoke(
+        cli.app, ["key", "rotate", "--reason", "cli lifecycle"]
+    )
+    assert rotated.exit_code == 0
+    assert json.loads(rotated.stdout)["new_key_id"] != old_key_id
+
+    second_run = runner.invoke(
+        cli.app, ["standalone", "run", "--iterations", "1"]
+    )
+    assert second_run.exit_code == 0
+    status = runner.invoke(cli.app, ["standalone", "status"])
+    assert status.exit_code == 0
+    assert json.loads(status.stdout)["verdict"] == "PASS_STANDALONE_V1_READY"
+
+    evidence_root = Path(initialised_payload["configuration"]["evidence_root"])
+    bundle = evidence_root / "exports" / "cli.zip"
+    exported = runner.invoke(
+        cli.app,
+        [
+            "standalone",
+            "evidence",
+            "export",
+            "--destination",
+            str(bundle),
+        ],
+    )
+    assert exported.exit_code == 0
+    verified = runner.invoke(
+        cli.app,
+        [
+            "standalone",
+            "evidence",
+            "verify",
+            "--bundle",
+            str(bundle),
+            "--expected-trust-anchor-key-id",
+            old_key_id,
+        ],
+    )
+    assert verified.exit_code == 0
+    assert json.loads(verified.stdout)["verdict"] == "PASS_EVIDENCE_BUNDLE_VERIFIED"
+
+    removed = runner.invoke(
+        cli.app,
+        ["standalone", "folder", "remove", "--folder-id", folder_id],
+    )
+    assert removed.exit_code == 0

@@ -16,7 +16,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from kratos_guard.core.signing import (
     inspect_key,
+    key_revocation_state,
+    local_trust_directory,
     sign_payload_bytes,
+    trusted_key_path,
+    verify_key_rotation,
     verify_local_payload_signature,
     verify_payload_signature,
 )
@@ -161,6 +165,7 @@ def append_ledger_entry(
     with _exclusive_lock(lock_path, stale_after_seconds=stale_lock_seconds):
         identity = inspect_key()
         previous_hash = ZERO_HASH
+        previous_key_id = ""
         sequence = 1
         if ledger_path.is_file():
             lines = [line for line in ledger_path.read_text(encoding="utf-8").splitlines() if line]
@@ -172,6 +177,23 @@ def append_ledger_entry(
                     raise ValueError("LEDGER_CHAIN_INVALID")
                 if _ledger_hash(previous) != previous.entry_hash:
                     raise ValueError("LEDGER_ENTRY_INTEGRITY_INVALID")
+                revocation = key_revocation_state(
+                    previous.signing_key_id, local_trust_directory()
+                )
+                if revocation == "REVOCATION_INVALID":
+                    raise ValueError("LEDGER_REVOCATION_RECORD_INVALID")
+                if revocation == "REVOKED":
+                    raise ValueError("LEDGER_SIGNING_KEY_REVOKED")
+                if (
+                    previous_key_id
+                    and previous.signing_key_id != previous_key_id
+                    and not verify_key_rotation(
+                        previous_key_id,
+                        previous.signing_key_id,
+                        local_trust_directory(),
+                    )
+                ):
+                    raise ValueError("LEDGER_KEY_TRANSITION_INVALID")
                 signature = verify_local_payload_signature(
                     _model_signing_bytes(previous),
                     previous.signature,
@@ -183,7 +205,25 @@ def append_ledger_entry(
                 ):
                     raise ValueError("LEDGER_ENTRY_SIGNATURE_INVALID")
                 previous_hash = previous.entry_hash
+                previous_key_id = previous.signing_key_id
             sequence = len(lines) + 1
+        active_revocation = key_revocation_state(
+            identity.key_id, local_trust_directory()
+        )
+        if active_revocation == "REVOCATION_INVALID":
+            raise ValueError("ACTIVE_KEY_REVOCATION_RECORD_INVALID")
+        if active_revocation == "REVOKED":
+            raise ValueError("ACTIVE_SIGNING_KEY_REVOKED")
+        if (
+            previous_key_id
+            and identity.key_id != previous_key_id
+            and not verify_key_rotation(
+                previous_key_id,
+                identity.key_id,
+                local_trust_directory(),
+            )
+        ):
+            raise ValueError("LEDGER_KEY_TRANSITION_INVALID")
         entry = LedgerEntry(
             sequence=sequence,
             recorded_at=now or datetime.now(UTC),
@@ -207,7 +247,7 @@ def append_ledger_entry(
         return entry
 
 
-def verify_ledger(ledger_path: Path, trusted_key_path: Path) -> LedgerVerification:
+def verify_ledger(ledger_path: Path, trust_path: Path) -> LedgerVerification:
     """Verify sequencing, hash links, entry integrity, and every signature."""
     if not ledger_path.is_file():
         return LedgerVerification(
@@ -222,6 +262,7 @@ def verify_ledger(ledger_path: Path, trusted_key_path: Path) -> LedgerVerificati
     previous_hash = ZERO_HASH
     head_hash = ZERO_HASH
     count = 0
+    previous_key_id = ""
     chain_state = "CHAIN_VALID"
     signature_state = "SIGNATURE_VALID"
     first_error = ""
@@ -243,10 +284,35 @@ def verify_ledger(ledger_path: Path, trusted_key_path: Path) -> LedgerVerificati
             chain_state = "CHAIN_INVALID"
             first_error = f"ENTRY_HASH_INVALID:{line_number}"
             break
+        trust_directory = trust_path if trust_path.is_dir() else trust_path.parent
+        revocation = key_revocation_state(entry.signing_key_id, trust_directory)
+        if revocation == "REVOCATION_INVALID":
+            signature_state = "SIGNATURE_INVALID"
+            first_error = f"REVOCATION_RECORD_INVALID:{line_number}"
+            break
+        if revocation == "REVOKED":
+            signature_state = "SIGNATURE_REVOKED"
+            first_error = f"ENTRY_SIGNER_REVOKED:{line_number}"
+            break
+        if (
+            previous_key_id
+            and entry.signing_key_id != previous_key_id
+            and (
+                not trust_path.is_dir()
+                or not verify_key_rotation(
+                    previous_key_id,
+                    entry.signing_key_id,
+                    trust_path,
+                )
+            )
+        ):
+            signature_state = "SIGNATURE_INVALID"
+            first_error = f"KEY_TRANSITION_INVALID:{line_number}"
+            break
         signature = verify_payload_signature(
             _model_signing_bytes(entry),
             entry.signature,
-            trusted_key_path,
+            trusted_key_path(trust_path, entry.signing_key_id),
             entry.signing_key_id,
         )
         if (
@@ -257,6 +323,7 @@ def verify_ledger(ledger_path: Path, trusted_key_path: Path) -> LedgerVerificati
             first_error = f"ENTRY_SIGNATURE_INVALID:{line_number}"
             break
         previous_hash = entry.entry_hash
+        previous_key_id = entry.signing_key_id
         head_hash = entry.entry_hash
     verdict = (
         "PASS_LEDGER_VERIFIED"
@@ -308,6 +375,7 @@ def snapshot_folder(
     *,
     max_files: int = 5000,
     max_file_bytes: int = 10_000_000,
+    max_total_bytes: int = 500_000_000,
     now: datetime | None = None,
 ) -> FolderSnapshot:
     """Create a deterministic, read-only manifest without following symlinks."""
@@ -337,6 +405,8 @@ def snapshot_folder(
                 continue
             if len(identities) >= max_files:
                 raise ValueError(f"MAX_FILE_COUNT_EXCEEDED:{max_files}")
+            if total_bytes + stat.st_size > max_total_bytes:
+                raise ValueError(f"MAX_TOTAL_BYTES_EXCEEDED:{max_total_bytes}")
             digest = sha256(candidate.read_bytes()).hexdigest()
             identities.append(
                 FolderFileIdentity(relative_path=relative, sha256=digest, byte_count=stat.st_size)

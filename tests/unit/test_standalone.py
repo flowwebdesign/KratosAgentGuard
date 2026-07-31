@@ -68,6 +68,16 @@ def test_folder_snapshot_is_deterministic_and_detects_drift(tmp_path: Path) -> N
     assert comparison.verdict == "DRIFT_DETECTED"
 
 
+def test_folder_snapshot_enforces_total_byte_limit(tmp_path: Path) -> None:
+    root = tmp_path / "observed"
+    root.mkdir()
+    (root / "a.txt").write_text("1234", encoding="utf-8")
+    (root / "b.txt").write_text("5678", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="MAX_TOTAL_BYTES_EXCEEDED:7"):
+        snapshot_folder(root, max_total_bytes=7)
+
+
 def test_folder_snapshot_excludes_symlinks(tmp_path: Path) -> None:
     root = tmp_path / "observed"
     outside = tmp_path / "outside.txt"

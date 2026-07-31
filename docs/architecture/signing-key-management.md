@@ -18,3 +18,18 @@ fingerprint and key ID may enter a Guard-authorised public trust directory.
 trust directory for CI and testing; it does not permit output outside the Guard
 repository. A valid signature proves key possession; claim verification
 remains independent.
+
+v1 rotation writes the new private key only after creating a dual-signed
+transition record. The outgoing and incoming keys sign identical canonical
+bytes. Ledger verification accepts a signer change only when that transition
+and both public keys are present and valid.
+
+The replaced private key is not retained; historical verification requires
+only its public key. An interrupted pre-commit temporary key is discarded
+before a later rotation while the still-active key remains authoritative.
+
+Revocation applies to historical keys after rotation. The active key cannot be
+revoked directly; rotate it first, then revoke the retired identity. Revoked
+signers deliberately make affected evidence fail closed. `key export-bundle`
+exports public keys, rotation records, and revocation records but never private
+material.

@@ -4,6 +4,7 @@ import base64
 import getpass
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -25,6 +26,7 @@ from kratos_guard.models.build import (
     SigningKeyIdentity,
     TrustRoot,
 )
+from kratos_guard.models.standalone import KeyRevocationRecord, KeyRotationRecord
 
 
 def key_store_root(
@@ -53,6 +55,56 @@ def key_store_root(
 
 def _fingerprint(public_bytes: bytes) -> str:
     return sha256(public_bytes).hexdigest()
+
+
+def _canonical_bytes(payload: object) -> bytes:
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def local_trust_directory() -> Path:
+    return key_store_root() / "trust"
+
+
+def _public_key_payload(private: Ed25519PrivateKey) -> dict[str, str]:
+    public_bytes = private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    fingerprint = _fingerprint(public_bytes)
+    return {
+        "algorithm": "Ed25519",
+        "key_id": f"ed25519-{fingerprint[:16]}",
+        "public_key_fingerprint": fingerprint,
+        "public_key_base64": base64.b64encode(public_bytes).decode(),
+    }
+
+
+def _write_public_key(private: Ed25519PrivateKey, trust_directory: Path) -> Path:
+    payload = _public_key_payload(private)
+    trust_directory.mkdir(parents=True, exist_ok=True)
+    destination = trust_directory / f"{payload['key_id']}.pub.json"
+    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if destination.exists():
+        if destination.read_text(encoding="utf-8") != rendered:
+            raise ValueError("TRUST_KEY_COLLISION")
+        return destination
+    destination.write_text(rendered, encoding="utf-8")
+    return destination
+
+
+def _rotation_signing_bytes(record: KeyRotationRecord) -> bytes:
+    payload = record.model_dump(mode="json")
+    payload.pop("previous_key_signature", None)
+    payload.pop("new_key_signature", None)
+    return _canonical_bytes(payload)
+
+
+def _revocation_signing_bytes(record: KeyRevocationRecord) -> bytes:
+    payload = record.model_dump(mode="json")
+    payload.pop("signature", None)
+    return _canonical_bytes(payload)
 
 
 def assess_key_storage(path: Path | None = None) -> KeyStorageAssessment:
@@ -115,11 +167,21 @@ def _restrict_key_directory(root: Path) -> None:
         root.chmod(0o700)
 
 
+def restrict_private_directory(root: Path) -> None:
+    """Apply the same private per-user storage boundary to non-key Guard state."""
+    _restrict_key_directory(root)
+
+
 def initialise_key() -> SigningKeyIdentity:
     root = key_store_root()
     private_path = root / "attestation-ed25519.pem"
     if private_path.exists():
-        return inspect_key()
+        identity = inspect_key()
+        private = serialization.load_pem_private_key(private_path.read_bytes(), password=None)
+        if not isinstance(private, Ed25519PrivateKey):
+            raise ValueError("KEY_MISMATCH")
+        _write_public_key(private, local_trust_directory())
+        return identity
     _restrict_key_directory(root)
     private = Ed25519PrivateKey.generate()
     private_bytes = private.private_bytes(
@@ -130,6 +192,7 @@ def initialise_key() -> SigningKeyIdentity:
     private_path.write_bytes(private_bytes)
     if os.name != "nt":
         private_path.chmod(0o600)
+    _write_public_key(private, local_trust_directory())
     assessment = assess_key_storage(root)
     if not assessment.restrictive_acl:
         private_path.unlink(missing_ok=True)
@@ -171,25 +234,105 @@ def export_public_key(trust_directory: Path) -> TrustRoot:
     )
     if not isinstance(private, Ed25519PrivateKey):
         raise ValueError("KEY_MISMATCH")
-    public_bytes = private.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    trust_directory.mkdir(parents=True, exist_ok=True)
-    destination = trust_directory / f"{identity.key_id}.pub.json"
-    payload = {
-        "algorithm": "Ed25519",
-        "key_id": identity.key_id,
-        "public_key_fingerprint": identity.public_key_fingerprint,
-        "public_key_base64": base64.b64encode(public_bytes).decode(),
-    }
-    destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    destination = _write_public_key(private, trust_directory)
     return TrustRoot(
         key_id=identity.key_id,
         public_key_fingerprint=identity.public_key_fingerprint,
         trusted_public_key_path=str(destination),
         state="TRUST_ROOT_PROVEN",
     )
+
+
+def export_trust_bundle(destination: Path) -> list[Path]:
+    """Export all public keys and signed lifecycle records; never private keys."""
+    initialise_key()
+    source = local_trust_directory()
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    exported: list[Path] = []
+    for path in sorted(item for item in source.rglob("*") if item.is_file()):
+        relative = path.relative_to(source)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+        exported.append(target)
+    return exported
+
+
+def trusted_key_path(trust_path: Path, key_id: str) -> Path:
+    if trust_path.is_file():
+        return trust_path
+    return trust_path / f"{key_id}.pub.json"
+
+
+def verify_key_rotation(
+    previous_key_id: str,
+    new_key_id: str,
+    trust_directory: Path,
+) -> bool:
+    record_path = (
+        trust_directory / "rotations" / f"{previous_key_id}-to-{new_key_id}.json"
+    )
+    if not record_path.is_file():
+        return False
+    try:
+        record = KeyRotationRecord.model_validate_json(
+            record_path.read_text(encoding="utf-8")
+        )
+        if (
+            record.previous_key_id != previous_key_id
+            or record.new_key_id != new_key_id
+        ):
+            return False
+        payload = _rotation_signing_bytes(record)
+        previous = verify_payload_signature(
+            payload,
+            record.previous_key_signature,
+            trusted_key_path(trust_directory, previous_key_id),
+            previous_key_id,
+        )
+        new = verify_payload_signature(
+            payload,
+            record.new_key_signature,
+            trusted_key_path(trust_directory, new_key_id),
+            new_key_id,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    return (
+        previous.signature_state == "SIGNATURE_VALID"
+        and previous.signer_trust_state == "TRUST_ROOT_PROVEN"
+        and new.signature_state == "SIGNATURE_VALID"
+        and new.signer_trust_state == "TRUST_ROOT_PROVEN"
+    )
+
+
+def key_revocation_state(key_id: str, trust_directory: Path) -> str:
+    path = trust_directory / "revocations" / f"{key_id}.json"
+    if not path.is_file():
+        return "NOT_REVOKED"
+    try:
+        record = KeyRevocationRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        if record.revoked_key_id != key_id:
+            return "REVOCATION_INVALID"
+        verification = verify_payload_signature(
+            _revocation_signing_bytes(record),
+            record.signature,
+            trusted_key_path(trust_directory, record.authorised_by_key_id),
+            record.authorised_by_key_id,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return "REVOCATION_INVALID"
+    if (
+        verification.signature_state != "SIGNATURE_VALID"
+        or verification.signer_trust_state != "TRUST_ROOT_PROVEN"
+    ):
+        return "REVOCATION_INVALID"
+    return "REVOKED"
+
+
+def is_key_revoked(key_id: str, trust_directory: Path) -> bool:
+    return key_revocation_state(key_id, trust_directory) != "NOT_REVOKED"
 
 
 def canonicalise_attestation_payload(attestation: BuildAttestation) -> bytes:
@@ -309,54 +452,130 @@ def verify_local_payload_signature(
     signature: str,
     expected_key_id: str,
 ) -> SignatureEvidence:
-    """Verify bytes against the currently established local Guard key."""
-    identity = inspect_key()
-    private = serialization.load_pem_private_key(
-        Path(identity.private_key_path).read_bytes(), password=None
-    )
-    if not isinstance(private, Ed25519PrivateKey):
-        raise ValueError("KEY_MISMATCH")
-    signature_state = "SIGNATURE_INVALID"
-    try:
-        private.public_key().verify(base64.b64decode(signature, validate=True), payload)
-        signature_state = "SIGNATURE_VALID"
-    except (ValueError, InvalidSignature):
-        pass
-    signer_state = (
-        "TRUST_ROOT_PROVEN" if identity.key_id == expected_key_id else "SIGNER_UNTRUSTED"
-    )
-    return SignatureEvidence(
-        algorithm="Ed25519",
-        key_id=expected_key_id,
-        payload_sha256=sha256(payload).hexdigest(),
-        signature=signature,
-        signature_state=signature_state,
-        signer_trust_state=signer_state,
+    """Verify bytes against the protected local historical trust bundle."""
+    initialise_key()
+    return verify_payload_signature(
+        payload,
+        signature,
+        trusted_key_path(local_trust_directory(), expected_key_id),
+        expected_key_id,
     )
 
 
-def rotate_key(reason: str) -> SigningKeyIdentity:
+def rotate_key(
+    reason: str,
+    trust_directory: Path | None = None,
+    *,
+    now: datetime | None = None,
+) -> SigningKeyIdentity:
     if not reason.strip():
         raise ValueError("rotation reason is required")
-    identity = inspect_key()
-    private_path = Path(identity.private_key_path)
-    archive = private_path.parent / "rotated"
-    archive.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    destination = archive / f"{identity.key_id}-{timestamp}.pem"
-    private_path.replace(destination)
-    record = archive / f"{identity.key_id}-{timestamp}.json"
-    record.write_text(
-        json.dumps(
-            {
-                "key_id": identity.key_id,
-                "rotated_at": timestamp,
-                "reason": reason,
-            },
-            indent=2,
-            sort_keys=True,
+    old_identity = initialise_key()
+    private_path = Path(old_identity.private_key_path)
+    old_private = serialization.load_pem_private_key(private_path.read_bytes(), password=None)
+    if not isinstance(old_private, Ed25519PrivateKey):
+        raise ValueError("KEY_MISMATCH")
+    root = private_path.parent
+    lock_path = root / "rotation.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as error:
+        raise RuntimeError("KEY_ROTATION_ALREADY_ACTIVE") from error
+    try:
+        os.write(descriptor, f"{os.getpid()}\n".encode())
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        abandoned_candidates = [
+            root / "attestation-ed25519.pem.next",
+            *root.glob(".attestation-ed25519.*.next"),
+        ]
+        for abandoned_next in abandoned_candidates:
+            abandoned_next.unlink(missing_ok=True)
+        new_private = Ed25519PrivateKey.generate()
+        new_payload = _public_key_payload(new_private)
+        rotated_at = now or datetime.now(UTC)
+        record = KeyRotationRecord(
+            previous_key_id=old_identity.key_id,
+            new_key_id=new_payload["key_id"],
+            rotated_at=rotated_at,
+            reason=reason.strip(),
+            previous_key_signature="pending",
+            new_key_signature="pending",
         )
-        + "\n",
-        encoding="utf-8",
+        payload = _rotation_signing_bytes(record)
+        record.previous_key_signature = base64.b64encode(old_private.sign(payload)).decode()
+        record.new_key_signature = base64.b64encode(new_private.sign(payload)).decode()
+
+        local_trust = local_trust_directory()
+        _write_public_key(old_private, local_trust)
+        _write_public_key(new_private, local_trust)
+        rotations = local_trust / "rotations"
+        rotations.mkdir(parents=True, exist_ok=True)
+        record_path = (
+            rotations / f"{record.previous_key_id}-to-{record.new_key_id}.json"
+        )
+        with record_path.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(record.model_dump_json(indent=2) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        next_path = root / f".attestation-ed25519.{record.new_key_id}.next"
+        with next_path.open("x+b") as stream:
+            stream.write(
+                new_private.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name != "nt":
+            next_path.chmod(0o600)
+        next_path.replace(private_path)
+        if trust_directory is not None:
+            export_trust_bundle(trust_directory)
+        return inspect_key()
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        lock_path.unlink(missing_ok=True)
+
+
+def revoke_key(
+    key_id: str,
+    reason: str,
+    trust_directory: Path | None = None,
+    *,
+    now: datetime | None = None,
+) -> KeyRevocationRecord:
+    if not reason.strip():
+        raise ValueError("revocation reason is required")
+    current = initialise_key()
+    if key_id == current.key_id:
+        raise ValueError("ACTIVE_KEY_MUST_BE_ROTATED_BEFORE_REVOCATION")
+    local_trust = local_trust_directory()
+    if not trusted_key_path(local_trust, key_id).is_file():
+        raise FileNotFoundError("REVOCATION_KEY_UNKNOWN")
+    record = KeyRevocationRecord(
+        revoked_key_id=key_id,
+        authorised_by_key_id=current.key_id,
+        revoked_at=now or datetime.now(UTC),
+        reason=reason.strip(),
+        signature="pending",
     )
-    return initialise_key()
+    _, record.signature = sign_payload_bytes(_revocation_signing_bytes(record))
+    revocations = local_trust / "revocations"
+    revocations.mkdir(parents=True, exist_ok=True)
+    destination = revocations / f"{key_id}.json"
+    with destination.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(record.model_dump_json(indent=2) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    if trust_directory is not None:
+        export_trust_bundle(trust_directory)
+    return record
